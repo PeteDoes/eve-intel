@@ -1,6 +1,7 @@
 import os
 import json
 from collections import Counter
+from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -49,7 +50,6 @@ async def get_employment_history(client, character_id):
         except Exception:
             corp_id_to_name = {}
 
-    # Sort newest first
     history_data.sort(key=lambda entry: entry.get("start_date", ""), reverse=True)
 
     result = []
@@ -62,6 +62,66 @@ async def get_employment_history(client, character_id):
         })
 
     return result
+
+def analyze_corp_hopping(history):
+    """Work out how long they stayed in each corp, and flag frequent short stints."""
+    if not history:
+        return [], {"short_stint_count": 0, "total_corps": 0, "is_flagged": False, "reason": "No employment history available"}
+
+    enriched = []
+    now = datetime.now(timezone.utc)
+
+    for i, entry in enumerate(history):
+        start_str = entry.get("start_date")
+        try:
+            start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00")) if start_str else None
+        except Exception:
+            start_dt = None
+
+        if i == 0:
+            end_dt = now
+            end_label = "Present"
+        else:
+            prev_start_str = history[i - 1].get("start_date")
+            try:
+                end_dt = datetime.fromisoformat(prev_start_str.replace("Z", "+00:00")) if prev_start_str else None
+            except Exception:
+                end_dt = None
+            end_label = end_dt.strftime("%Y-%m-%d") if end_dt else "Unknown"
+
+        duration_days = None
+        if start_dt and end_dt:
+            duration_days = (end_dt - start_dt).days
+
+        enriched.append({
+            "corporation_name": entry.get("corporation_name"),
+            "start_date": entry.get("start_date"),
+            "end_date": end_label,
+            "duration_days": duration_days,
+            "is_deleted": entry.get("is_deleted", False),
+        })
+
+    short_stints = [e for e in enriched if e["duration_days"] is not None and e["duration_days"] < 30]
+    total_corps = len(enriched)
+    short_stint_count = len(short_stints)
+
+    is_flagged = short_stint_count >= 3 or (total_corps >= 4 and short_stint_count / total_corps >= 0.5)
+
+    if is_flagged:
+        reason = f"{short_stint_count} of {total_corps} corp memberships lasted under 30 days. Frequent short stints can indicate scouting or spying behavior."
+    elif short_stint_count > 0:
+        reason = f"{short_stint_count} of {total_corps} corp memberships lasted under 30 days. Worth a closer look, but not necessarily alarming on its own."
+    else:
+        reason = "No unusually short corp memberships detected."
+
+    summary = {
+        "short_stint_count": short_stint_count,
+        "total_corps": total_corps,
+        "is_flagged": is_flagged,
+        "reason": reason,
+    }
+
+    return enriched, summary
 
 async def get_fleetmates(client, character_id, kill_limit=25, name_limit=15):
     """Scan recent killmails to find who this character actually flies with, plus their corp."""
@@ -234,7 +294,8 @@ async def get_character(name: str):
             zkill_stats = {"error": f"Could not fetch zKillboard stats: {str(e)}"}
 
         top_characters = await get_fleetmates(client, character_id, kill_limit=25, name_limit=15)
-        employment_history = await get_employment_history(client, character_id)
+        raw_employment_history = await get_employment_history(client, character_id)
+        employment_history, corp_hop_analysis = analyze_corp_hopping(raw_employment_history)
 
         result = {
             "name": name,
@@ -252,6 +313,7 @@ async def get_character(name: str):
             "flies_with_corporations": top_corporations,
             "flies_with_alliances": top_alliances,
             "employment_history": employment_history,
+            "corp_hop_analysis": corp_hop_analysis,
             "from_cache": False,
         }
 
