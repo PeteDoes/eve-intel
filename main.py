@@ -28,8 +28,34 @@ async def get_character(name: str):
         )
         details = detail_resp.json()
 
+        corporation_id = details.get("corporation_id")
+        alliance_id = details.get("alliance_id")
+
+        # Step 3: Get the corporation name
+        corp_name = None
+        if corporation_id:
+            corp_resp = await client.get(
+                f"https://esi.evetech.net/latest/corporations/{corporation_id}/"
+            )
+            corp_data = corp_resp.json()
+            corp_name = corp_data.get("name")
+
+        # Step 4: Get the alliance name (if they're in one)
+        alliance_name = None
+        if alliance_id:
+            alliance_resp = await client.get(
+                f"https://esi.evetech.net/latest/alliances/{alliance_id}/"
+            )
+            alliance_data = alliance_resp.json()
+            alliance_name = alliance_data.get("name")
+
         return {
             "name": name,
             "character_id": character_id,
-            "details": details
+            "security_status": details.get("security_status"),
+            "birthday": details.get("birthday"),
+            "corporation_id": corporation_id,
+            "corporation_name": corp_name,
+            "alliance_id": alliance_id,
+            "alliance_name": alliance_name,
         }
