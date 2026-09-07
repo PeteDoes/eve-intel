@@ -10,7 +10,7 @@ def read_root():
 @app.get("/character/{name}")
 async def get_character(name: str):
     headers = {"User-Agent": "eve-intel-app (contact: your-email@example.com)"}
-    async with httpx.AsyncClient(headers=headers) as client:
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
         # Step 1: Convert the character name into an ID
         search_resp = await client.post(
             "https://esi.evetech.net/latest/universe/ids/",
@@ -48,18 +48,23 @@ async def get_character(name: str):
             )
             alliance_name = alliance_resp.json().get("name")
 
-        # Step 5: Get zKillboard stats (debug version)
+        # Step 5: Get zKillboard stats
         zkill_stats = {}
         try:
             zkill_resp = await client.get(
                 f"https://zkillboard.com/api/stats/characterID/{character_id}/"
             )
+            zkill_data = zkill_resp.json()
             zkill_stats = {
-                "debug_status_code": zkill_resp.status_code,
-                "debug_raw_text": zkill_resp.text[:500],
+                "ships_destroyed": zkill_data.get("shipsDestroyed"),
+                "ships_lost": zkill_data.get("shipsLost"),
+                "isk_destroyed": zkill_data.get("iskDestroyed"),
+                "isk_lost": zkill_data.get("iskLost"),
+                "danger_ratio": zkill_data.get("dangerRatio"),
+                "gang_ratio": zkill_data.get("gangRatio"),
             }
         except Exception as e:
-            zkill_stats = {"error": f"Exception occurred: {str(e)}"}
+            zkill_stats = {"error": f"Could not fetch zKillboard stats: {str(e)}"}
 
         return {
             "name": name,
