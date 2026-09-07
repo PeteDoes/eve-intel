@@ -1,210 +1,221 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>EVE Intel</title>
-<style>
-  body {
-    background-color: #0d0d0f;
-    color: #e6e6e6;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-  }
-  header {
-    width: 100%;
-    text-align: center;
-    padding: 40px 20px 20px 20px;
-  }
-  h1 {
-    font-size: 28px;
-    margin: 0;
-    color: #f2f2f2;
-  }
-  .subtitle {
-    color: #888;
-    margin-top: 6px;
-    font-size: 14px;
-  }
-  .search-box {
-    display: flex;
-    gap: 8px;
-    width: 90%;
-    max-width: 500px;
-    margin-top: 24px;
-  }
-  input {
-    flex: 1;
-    padding: 12px 14px;
-    border-radius: 8px;
-    border: 1px solid #333;
-    background-color: #1a1a1d;
-    color: #fff;
-    font-size: 16px;
-  }
-  button {
-    padding: 12px 20px;
-    border-radius: 8px;
-    border: none;
-    background-color: #4f46e5;
-    color: white;
-    font-size: 16px;
-    cursor: pointer;
-  }
-  button:hover {
-    background-color: #4338ca;
-  }
-  #result {
-    width: 90%;
-    max-width: 500px;
-    margin-top: 30px;
-    display: none;
-  }
-  .card {
-    background-color: #1a1a1d;
-    border-radius: 12px;
-    padding: 20px;
-    margin-bottom: 16px;
-  }
-  .row {
-    display: flex;
-    justify-content: space-between;
-    padding: 8px 0;
-    border-bottom: 1px solid #2a2a2e;
-    font-size: 14px;
-  }
-  .row:last-child {
-    border-bottom: none;
-  }
-  .label {
-    color: #999;
-  }
-  .value {
-    color: #fff;
-    font-weight: 500;
-    text-align: right;
-  }
-  .char-name {
-    font-size: 20px;
-    font-weight: 600;
-    margin-bottom: 10px;
-    color: #fff;
-  }
-  .card-title {
-    font-size: 13px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: #888;
-    margin-bottom: 10px;
-  }
-  #loading {
-    margin-top: 20px;
-    color: #888;
-    display: none;
-  }
-</style>
-</head>
-<body>
+import os
+import json
+from collections import Counter
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import httpx
+import redis.asyncio as redis
 
-<header>
-  <h1>EVE Intel</h1>
-  <div class="subtitle">Character lookup for New Eden</div>
-</header>
+app = FastAPI()
 
-<div class="search-box">
-  <input type="text" id="nameInput" placeholder="Enter character name...">
-  <button onclick="searchCharacter()">Search</button>
-</div>
+redis_client = redis.from_url(os.environ.get("REDIS_URL"), decode_responses=True)
 
-<div id="loading">Searching...</div>
+@app.get("/")
+def read_root():
+    return FileResponse("static/index.html")
 
-<div id="result"></div>
+def extract_top_list(top_lists, list_type, limit=5):
+    for entry in top_lists:
+        if entry.get("type") == list_type:
+            values = entry.get("values", [])
+            return values[:limit]
+    return []
 
-<script>
-function buildListRows(items) {
-  if (!items || items.length === 0) {
-    return `<div class="row"><span class="value">No data available</span></div>`;
-  }
-  return items.map(item => `
-    <div class="row">
-      <span class="label">${item.name || 'Unknown'}</span>
-      <span class="value">${item.kills} kills</span>
-    </div>
-  `).join('');
-}
+async def get_fleetmates(client, character_id, kill_limit=25, name_limit=15):
+    """Scan recent killmails to find who this character actually flies with, plus their corp."""
+    try:
+        kills_resp = await client.get(
+            f"https://zkillboard.com/api/kills/characterID/{character_id}/"
+        )
+        kills_list = kills_resp.json()
+    except Exception:
+        return []
 
-async function searchCharacter() {
-  const name = document.getElementById('nameInput').value.trim();
-  if (!name) return;
+    if not isinstance(kills_list, list):
+        return []
 
-  const resultDiv = document.getElementById('result');
-  const loadingDiv = document.getElementById('loading');
-  resultDiv.style.display = 'none';
-  loadingDiv.style.display = 'block';
+    kills_to_check = kills_list[:kill_limit]
 
-  try {
-    const response = await fetch(`/api/character/${encodeURIComponent(name)}`);
-    const data = await response.json();
+    fleetmate_counter = Counter()
+    fleetmate_corp_id = {}
 
-    loadingDiv.style.display = 'none';
-    resultDiv.style.display = 'block';
+    for kill in kills_to_check:
+        killmail_id = kill.get("killmail_id")
+        kill_hash = kill.get("zkb", {}).get("hash")
 
-    if (data.error) {
-      resultDiv.innerHTML = `<div class="card"><div class="row"><span class="value">${data.error}</span></div></div>`;
-      return;
-    }
+        if not killmail_id or not kill_hash:
+            continue
 
-    const zk = data.zkillboard || {};
+        try:
+            killmail_resp = await client.get(
+                f"https://esi.evetech.net/latest/killmails/{killmail_id}/{kill_hash}/"
+            )
+            killmail_data = killmail_resp.json()
+        except Exception:
+            continue
 
-    resultDiv.innerHTML = `
-      <div class="card">
-        <div class="char-name">${data.name}</div>
-        <div class="row"><span class="label">Corporation</span><span class="value">${data.corporation_name || '—'}</span></div>
-        <div class="row"><span class="label">Alliance</span><span class="value">${data.alliance_name || '—'}</span></div>
-        <div class="row"><span class="label">Security Status</span><span class="value">${data.security_status ?? '—'}</span></div>
-        <div class="row"><span class="label">Ships Destroyed</span><span class="value">${zk.ships_destroyed ?? '—'}</span></div>
-        <div class="row"><span class="label">Ships Lost</span><span class="value">${zk.ships_lost ?? '—'}</span></div>
-        <div class="row"><span class="label">ISK Destroyed</span><span class="value">${zk.isk_destroyed ? Math.round(zk.isk_destroyed).toLocaleString() : '—'}</span></div>
-        <div class="row"><span class="label">Danger Ratio</span><span class="value">${zk.danger_ratio ?? '—'}</span></div>
-      </div>
+        attackers = killmail_data.get("attackers", [])
+        for attacker in attackers:
+            attacker_id = attacker.get("character_id")
+            if attacker_id and attacker_id != character_id:
+                fleetmate_counter[attacker_id] += 1
+                # Remember their corp ID from the most recent killmail we see
+                corp_id = attacker.get("corporation_id")
+                if corp_id:
+                    fleetmate_corp_id[attacker_id] = corp_id
 
-      <div class="card">
-        <div class="card-title">Preferred Ships (Recent Activity)</div>
-        ${buildListRows(data.top_ships)}
-      </div>
+    if not fleetmate_counter:
+        return []
 
-      <div class="card">
-        <div class="card-title">Frequently Flies With — Alliances (Recent Activity)</div>
-        ${buildListRows(data.flies_with_alliances)}
-      </div>
+    top_fleetmate_ids = [char_id for char_id, count in fleetmate_counter.most_common(name_limit)]
 
-      <div class="card">
-        <div class="card-title">Frequently Flies With — Corporations (Recent Activity)</div>
-        ${buildListRows(data.flies_with_corporations)}
-      </div>
+    # Resolve character IDs to names
+    try:
+        names_resp = await client.post(
+            "https://esi.evetech.net/latest/universe/names/",
+            json=top_fleetmate_ids
+        )
+        names_data = names_resp.json()
+    except Exception:
+        names_data = []
 
-      <div class="card">
-        <div class="card-title">Frequently Flies With — Characters (Recent Activity)</div>
-        ${buildListRows(data.flies_with_characters)}
-      </div>
-    `;
-  } catch (err) {
-    loadingDiv.style.display = 'none';
-    resultDiv.style.display = 'block';
-    resultDiv.innerHTML = `<div class="card"><div class="row"><span class="value">Something went wrong. Please try again.</span></div></div>`;
-  }
-}
+    id_to_name = {entry["id"]: entry["name"] for entry in names_data if "id" in entry and "name" in entry}
 
-document.getElementById('nameInput').addEventListener('keypress', function(e) {
-  if (e.key === 'Enter') {
-    searchCharacter();
-  }
-});
-</script>
+    # Resolve corp IDs to names (only the unique ones we need)
+    unique_corp_ids = list(set(fleetmate_corp_id.values()))
+    corp_id_to_name = {}
+    if unique_corp_ids:
+        try:
+            corp_names_resp = await client.post(
+                "https://esi.evetech.net/latest/universe/names/",
+                json=unique_corp_ids
+            )
+            corp_names_data = corp_names_resp.json()
+            corp_id_to_name = {entry["id"]: entry["name"] for entry in corp_names_data if "id" in entry and "name" in entry}
+        except Exception:
+            corp_id_to_name = {}
 
-</body>
-</html>
+    result = []
+    for char_id, count in fleetmate_counter.most_common(name_limit):
+        corp_id = fleetmate_corp_id.get(char_id)
+        result.append({
+            "name": id_to_name.get(char_id, f"Unknown ({char_id})"),
+            "corporation_name": corp_id_to_name.get(corp_id, "Unknown"),
+            "kills": count
+        })
+
+    return result
+
+@app.get("/api/character/{name}")
+async def get_character(name: str):
+    cache_key = f"character:{name.lower()}"
+
+    cached = await redis_client.get(cache_key)
+    if cached:
+        result = json.loads(cached)
+        result["from_cache"] = True
+        return result
+
+    headers = {"User-Agent": "eve-intel-app (contact: your-email@example.com)"}
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0) as client:
+        search_resp = await client.post(
+            "https://esi.evetech.net/latest/universe/ids/",
+            json=[name]
+        )
+        search_data = search_resp.json()
+
+        if "characters" not in search_data or len(search_data["characters"]) == 0:
+            return {"error": f"No character found with name '{name}'"}
+
+        character_id = search_data["characters"][0]["id"]
+
+        detail_resp = await client.get(
+            f"https://esi.evetech.net/latest/characters/{character_id}/"
+        )
+        details = detail_resp.json()
+
+        corporation_id = details.get("corporation_id")
+        alliance_id = details.get("alliance_id")
+
+        corp_name = None
+        if corporation_id:
+            corp_resp = await client.get(
+                f"https://esi.evetech.net/latest/corporations/{corporation_id}/"
+            )
+            corp_name = corp_resp.json().get("name")
+
+        alliance_name = None
+        if alliance_id:
+            alliance_resp = await client.get(
+                f"https://esi.evetech.net/latest/alliances/{alliance_id}/"
+            )
+            alliance_name = alliance_resp.json().get("name")
+
+        zkill_stats = {}
+        top_ships = []
+        top_corporations = []
+        top_alliances = []
+
+        try:
+            zkill_resp = await client.get(
+                f"https://zkillboard.com/api/stats/characterID/{character_id}/"
+            )
+            zkill_data = zkill_resp.json()
+            top_lists = zkill_data.get("topLists", [])
+
+            zkill_stats = {
+                "ships_destroyed": zkill_data.get("shipsDestroyed"),
+                "ships_lost": zkill_data.get("shipsLost"),
+                "isk_destroyed": zkill_data.get("iskDestroyed"),
+                "isk_lost": zkill_data.get("iskLost"),
+                "danger_ratio": zkill_data.get("dangerRatio"),
+                "gang_ratio": zkill_data.get("gangRatio"),
+            }
+
+            for ship in extract_top_list(top_lists, "shipType"):
+                top_ships.append({
+                    "name": ship.get("shipName"),
+                    "kills": ship.get("kills"),
+                })
+
+            for corp in extract_top_list(top_lists, "corporation"):
+                top_corporations.append({
+                    "name": corp.get("corporationName"),
+                    "kills": corp.get("kills"),
+                })
+
+            for alliance in extract_top_list(top_lists, "alliance"):
+                top_alliances.append({
+                    "name": alliance.get("allianceName"),
+                    "kills": alliance.get("kills"),
+                })
+
+        except Exception as e:
+            zkill_stats = {"error": f"Could not fetch zKillboard stats: {str(e)}"}
+
+        # Real fleetmates, found by scanning actual killmails
+        top_characters = await get_fleetmates(client, character_id, kill_limit=25, name_limit=15)
+
+        result = {
+            "name": name,
+            "character_id": character_id,
+            "security_status": details.get("security_status"),
+            "birthday": details.get("birthday"),
+            "corporation_id": corporation_id,
+            "corporation_name": corp_name,
+            "alliance_id": alliance_id,
+            "alliance_name": alliance_name,
+            "zkillboard": zkill_stats,
+            "top_ships": top_ships,
+            "flies_with_characters": top_characters,
+            "flies_with_corporations": top_corporations,
+            "flies_with_alliances": top_alliances,
+            "from_cache": False,
+        }
+
+        await redis_client.set(cache_key, json.dumps(result), ex=600)
+
+        return result
+
+app.mount("/", StaticFiles(directory="static"), name="static")
