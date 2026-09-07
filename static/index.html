@@ -62,10 +62,13 @@
     width: 90%;
     max-width: 500px;
     margin-top: 30px;
+    display: none;
+  }
+  .card {
     background-color: #1a1a1d;
     border-radius: 12px;
     padding: 20px;
-    display: none;
+    margin-bottom: 16px;
   }
   .row {
     display: flex;
@@ -91,6 +94,13 @@
     margin-bottom: 10px;
     color: #fff;
   }
+  .card-title {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #888;
+    margin-bottom: 10px;
+  }
   #loading {
     margin-top: 20px;
     color: #888;
@@ -115,6 +125,18 @@
 <div id="result"></div>
 
 <script>
+function buildListRows(items, labelKey) {
+  if (!items || items.length === 0) {
+    return `<div class="row"><span class="value">No data available</span></div>`;
+  }
+  return items.map(item => `
+    <div class="row">
+      <span class="label">${item.name || 'Unknown'}</span>
+      <span class="value">${item.kills} kills</span>
+    </div>
+  `).join('');
+}
+
 async function searchCharacter() {
   const name = document.getElementById('nameInput').value.trim();
   if (!name) return;
@@ -132,26 +154,48 @@ async function searchCharacter() {
     resultDiv.style.display = 'block';
 
     if (data.error) {
-      resultDiv.innerHTML = `<div class="row"><span class="value">${data.error}</span></div>`;
+      resultDiv.innerHTML = `<div class="card"><div class="row"><span class="value">${data.error}</span></div></div>`;
       return;
     }
 
     const zk = data.zkillboard || {};
 
     resultDiv.innerHTML = `
-      <div class="char-name">${data.name}</div>
-      <div class="row"><span class="label">Corporation</span><span class="value">${data.corporation_name || '—'}</span></div>
-      <div class="row"><span class="label">Alliance</span><span class="value">${data.alliance_name || '—'}</span></div>
-      <div class="row"><span class="label">Security Status</span><span class="value">${data.security_status ?? '—'}</span></div>
-      <div class="row"><span class="label">Ships Destroyed</span><span class="value">${zk.ships_destroyed ?? '—'}</span></div>
-      <div class="row"><span class="label">Ships Lost</span><span class="value">${zk.ships_lost ?? '—'}</span></div>
-      <div class="row"><span class="label">ISK Destroyed</span><span class="value">${zk.isk_destroyed ? Math.round(zk.isk_destroyed).toLocaleString() : '—'}</span></div>
-      <div class="row"><span class="label">Danger Ratio</span><span class="value">${zk.danger_ratio ?? '—'}</span></div>
+      <div class="card">
+        <div class="char-name">${data.name}</div>
+        <div class="row"><span class="label">Corporation</span><span class="value">${data.corporation_name || '—'}</span></div>
+        <div class="row"><span class="label">Alliance</span><span class="value">${data.alliance_name || '—'}</span></div>
+        <div class="row"><span class="label">Security Status</span><span class="value">${data.security_status ?? '—'}</span></div>
+        <div class="row"><span class="label">Ships Destroyed</span><span class="value">${zk.ships_destroyed ?? '—'}</span></div>
+        <div class="row"><span class="label">Ships Lost</span><span class="value">${zk.ships_lost ?? '—'}</span></div>
+        <div class="row"><span class="label">ISK Destroyed</span><span class="value">${zk.isk_destroyed ? Math.round(zk.isk_destroyed).toLocaleString() : '—'}</span></div>
+        <div class="row"><span class="label">Danger Ratio</span><span class="value">${zk.danger_ratio ?? '—'}</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Preferred Ships</div>
+        ${buildListRows(data.top_ships)}
+      </div>
+
+      <div class="card">
+        <div class="card-title">Frequently Flies With (Characters)</div>
+        ${buildListRows(data.flies_with_characters)}
+      </div>
+
+      <div class="card">
+        <div class="card-title">Frequently Flies With (Corporations)</div>
+        ${buildListRows(data.flies_with_corporations)}
+      </div>
+
+      <div class="card">
+        <div class="card-title">Frequently Flies With (Alliances)</div>
+        ${buildListRows(data.flies_with_alliances)}
+      </div>
     `;
   } catch (err) {
     loadingDiv.style.display = 'none';
     resultDiv.style.display = 'block';
-    resultDiv.innerHTML = `<div class="row"><span class="value">Something went wrong. Please try again.</span></div>`;
+    resultDiv.innerHTML = `<div class="card"><div class="row"><span class="value">Something went wrong. Please try again.</span></div></div>`;
   }
 }
 
