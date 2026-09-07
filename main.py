@@ -1,7 +1,12 @@
+import os
+import json
 from fastapi import FastAPI
 import httpx
+import redis.asyncio as redis
 
 app = FastAPI()
+
+redis_client = redis.from_url(os.environ.get("REDIS_URL"), decode_responses=True)
 
 @app.get("/")
 def read_root():
@@ -9,6 +14,15 @@ def read_root():
 
 @app.get("/character/{name}")
 async def get_character(name: str):
+    cache_key = f"character:{name.lower()}"
+
+    # Check if we already have this in the cache
+    cached = await redis_client.get(cache_key)
+    if cached:
+        result = json.loads(cached)
+        result["from_cache"] = True
+        return result
+
     headers = {"User-Agent": "eve-intel-app (contact: your-email@example.com)"}
     async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
         # Step 1: Convert the character name into an ID
@@ -66,7 +80,7 @@ async def get_character(name: str):
         except Exception as e:
             zkill_stats = {"error": f"Could not fetch zKillboard stats: {str(e)}"}
 
-        return {
+        result = {
             "name": name,
             "character_id": character_id,
             "security_status": details.get("security_status"),
@@ -76,4 +90,10 @@ async def get_character(name: str):
             "alliance_id": alliance_id,
             "alliance_name": alliance_name,
             "zkillboard": zkill_stats,
+            "from_cache": False,
         }
+
+        # Save to cache for 10 minutes (600 seconds)
+        await redis_client.set(cache_key, json.dumps(result), ex=600)
+
+        return result
