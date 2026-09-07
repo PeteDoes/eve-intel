@@ -22,7 +22,7 @@ def extract_top_list(top_lists, list_type, limit=5):
             return values[:limit]
     return []
 
-async def get_fleetmates(client, character_id, kill_limit=25):
+async def get_fleetmates(client, character_id, kill_limit=25, name_limit=15):
     """Scan recent killmails to find who this character actually flies with."""
     try:
         kills_resp = await client.get(
@@ -63,7 +63,7 @@ async def get_fleetmates(client, character_id, kill_limit=25):
     if not fleetmate_counter:
         return []
 
-    top_fleetmate_ids = [char_id for char_id, count in fleetmate_counter.most_common(5)]
+    top_fleetmate_ids = [char_id for char_id, count in fleetmate_counter.most_common(name_limit)]
 
     # Resolve IDs to names
     try:
@@ -78,7 +78,7 @@ async def get_fleetmates(client, character_id, kill_limit=25):
     id_to_name = {entry["id"]: entry["name"] for entry in names_data if "id" in entry and "name" in entry}
 
     result = []
-    for char_id, count in fleetmate_counter.most_common(5):
+    for char_id, count in fleetmate_counter.most_common(name_limit):
         result.append({
             "name": id_to_name.get(char_id, f"Unknown ({char_id})"),
             "kills": count
@@ -174,7 +174,7 @@ async def get_character(name: str):
             zkill_stats = {"error": f"Could not fetch zKillboard stats: {str(e)}"}
 
         # Real fleetmates, found by scanning actual killmails
-        top_characters = await get_fleetmates(client, character_id, kill_limit=25)
+        top_characters = await get_fleetmates(client, character_id, kill_limit=25, name_limit=15)
 
         result = {
             "name": name,
