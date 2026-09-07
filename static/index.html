@@ -173,6 +173,21 @@ function buildListRows(items) {
   }).join('');
 }
 
+function buildEmploymentRows(history) {
+  if (!history || history.length === 0) {
+    return `<div class="row"><span class="value">No data available</span></div>`;
+  }
+  return history.map(entry => {
+    const date = entry.start_date ? new Date(entry.start_date).toLocaleDateString() : 'Unknown date';
+    return `
+      <div class="row">
+        <span class="label">${entry.corporation_name}${entry.is_deleted ? ' (defunct)' : ''}</span>
+        <span class="value">${date}</span>
+      </div>
+    `;
+  }).join('');
+}
+
 async function searchCharacter() {
   const name = document.getElementById('nameInput').value.trim();
   if (!name) return;
@@ -209,6 +224,11 @@ async function searchCharacter() {
         <div class="row"><span class="label">Ships Lost</span><span class="value">${zk.ships_lost ?? '—'}</span></div>
         <div class="row"><span class="label">ISK Destroyed</span><span class="value">${zk.isk_destroyed ? Math.round(zk.isk_destroyed).toLocaleString() : '—'}</span></div>
         <div class="row"><span class="label">Danger Ratio</span><span class="value">${zk.danger_ratio ?? '—'}</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Employment History</div>
+        ${buildEmploymentRows(data.employment_history)}
       </div>
 
       <div class="card">
