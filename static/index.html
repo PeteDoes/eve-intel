@@ -125,7 +125,7 @@
 <div id="result"></div>
 
 <script>
-function buildListRows(items, labelKey) {
+function buildListRows(items) {
   if (!items || items.length === 0) {
     return `<div class="row"><span class="value">No data available</span></div>`;
   }
@@ -173,23 +173,23 @@ async function searchCharacter() {
       </div>
 
       <div class="card">
-        <div class="card-title">Preferred Ships</div>
+        <div class="card-title">Preferred Ships (Recent Activity)</div>
         ${buildListRows(data.top_ships)}
       </div>
 
       <div class="card">
-        <div class="card-title">Frequently Flies With (Characters)</div>
-        ${buildListRows(data.flies_with_characters)}
+        <div class="card-title">Frequently Flies With — Alliances (Recent Activity)</div>
+        ${buildListRows(data.flies_with_alliances)}
       </div>
 
       <div class="card">
-        <div class="card-title">Frequently Flies With (Corporations)</div>
+        <div class="card-title">Frequently Flies With — Corporations (Recent Activity)</div>
         ${buildListRows(data.flies_with_corporations)}
       </div>
 
       <div class="card">
-        <div class="card-title">Frequently Flies With (Alliances)</div>
-        ${buildListRows(data.flies_with_alliances)}
+        <div class="card-title">Frequently Flies With — Characters (Recent Activity)</div>
+        ${buildListRows(data.flies_with_characters)}
       </div>
     `;
   } catch (err) {
