@@ -1,6 +1,8 @@
 import os
 import json
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 import httpx
 import redis.asyncio as redis
 
@@ -10,9 +12,9 @@ redis_client = redis.from_url(os.environ.get("REDIS_URL"), decode_responses=True
 
 @app.get("/")
 def read_root():
-    return {"status": "EVE Intel backend is running"}
+    return FileResponse("static/index.html")
 
-@app.get("/character/{name}")
+@app.get("/api/character/{name}")
 async def get_character(name: str):
     cache_key = f"character:{name.lower()}"
 
@@ -97,3 +99,5 @@ async def get_character(name: str):
         await redis_client.set(cache_key, json.dumps(result), ex=600)
 
         return result
+
+app.mount("/", StaticFiles(directory="static"), name="static")
