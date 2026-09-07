@@ -22,6 +22,47 @@ def extract_top_list(top_lists, list_type, limit=5):
             return values[:limit]
     return []
 
+async def get_employment_history(client, character_id):
+    """Get the character's full corporation history with dates."""
+    try:
+        history_resp = await client.get(
+            f"https://esi.evetech.net/latest/characters/{character_id}/corporationhistory/"
+        )
+        history_data = history_resp.json()
+    except Exception:
+        return []
+
+    if not isinstance(history_data, list):
+        return []
+
+    corp_ids = list(set(entry.get("corporation_id") for entry in history_data if entry.get("corporation_id")))
+
+    corp_id_to_name = {}
+    if corp_ids:
+        try:
+            names_resp = await client.post(
+                "https://esi.evetech.net/latest/universe/names/",
+                json=corp_ids
+            )
+            names_data = names_resp.json()
+            corp_id_to_name = {entry["id"]: entry["name"] for entry in names_data if "id" in entry and "name" in entry}
+        except Exception:
+            corp_id_to_name = {}
+
+    # Sort newest first
+    history_data.sort(key=lambda entry: entry.get("start_date", ""), reverse=True)
+
+    result = []
+    for entry in history_data:
+        corp_id = entry.get("corporation_id")
+        result.append({
+            "corporation_name": corp_id_to_name.get(corp_id, f"Unknown ({corp_id})"),
+            "start_date": entry.get("start_date"),
+            "is_deleted": entry.get("is_deleted", False),
+        })
+
+    return result
+
 async def get_fleetmates(client, character_id, kill_limit=25, name_limit=15):
     """Scan recent killmails to find who this character actually flies with, plus their corp."""
     try:
@@ -193,6 +234,7 @@ async def get_character(name: str):
             zkill_stats = {"error": f"Could not fetch zKillboard stats: {str(e)}"}
 
         top_characters = await get_fleetmates(client, character_id, kill_limit=25, name_limit=15)
+        employment_history = await get_employment_history(client, character_id)
 
         result = {
             "name": name,
@@ -209,6 +251,7 @@ async def get_character(name: str):
             "flies_with_characters": top_characters,
             "flies_with_corporations": top_corporations,
             "flies_with_alliances": top_alliances,
+            "employment_history": employment_history,
             "from_cache": False,
         }
 
