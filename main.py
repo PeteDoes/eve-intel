@@ -14,6 +14,13 @@ redis_client = redis.from_url(os.environ.get("REDIS_URL"), decode_responses=True
 def read_root():
     return FileResponse("static/index.html")
 
+def extract_top_list(top_lists, list_type, limit=5):
+    for entry in top_lists:
+        if entry.get("type") == list_type:
+            values = entry.get("values", [])
+            return values[:limit]
+    return []
+
 @app.get("/api/character/{name}")
 async def get_character(name: str):
     cache_key = f"character:{name.lower()}"
@@ -60,13 +67,18 @@ async def get_character(name: str):
             alliance_name = alliance_resp.json().get("name")
 
         zkill_stats = {}
-        zkill_debug_raw = None
+        top_ships = []
+        top_characters = []
+        top_corporations = []
+        top_alliances = []
+
         try:
             zkill_resp = await client.get(
                 f"https://zkillboard.com/api/stats/characterID/{character_id}/"
             )
             zkill_data = zkill_resp.json()
-            zkill_debug_raw = zkill_data.get("topLists")
+            top_lists = zkill_data.get("topLists", [])
+
             zkill_stats = {
                 "ships_destroyed": zkill_data.get("shipsDestroyed"),
                 "ships_lost": zkill_data.get("shipsLost"),
@@ -75,6 +87,34 @@ async def get_character(name: str):
                 "danger_ratio": zkill_data.get("dangerRatio"),
                 "gang_ratio": zkill_data.get("gangRatio"),
             }
+
+            # Preferred ships
+            for ship in extract_top_list(top_lists, "shipType"):
+                top_ships.append({
+                    "name": ship.get("shipName"),
+                    "kills": ship.get("kills"),
+                })
+
+            # Who they fly with
+            for char in extract_top_list(top_lists, "character"):
+                if char.get("characterID") != character_id:
+                    top_characters.append({
+                        "name": char.get("characterName"),
+                        "kills": char.get("kills"),
+                    })
+
+            for corp in extract_top_list(top_lists, "corporation"):
+                top_corporations.append({
+                    "name": corp.get("corporationName"),
+                    "kills": corp.get("kills"),
+                })
+
+            for alliance in extract_top_list(top_lists, "alliance"):
+                top_alliances.append({
+                    "name": alliance.get("allianceName"),
+                    "kills": alliance.get("kills"),
+                })
+
         except Exception as e:
             zkill_stats = {"error": f"Could not fetch zKillboard stats: {str(e)}"}
 
@@ -88,7 +128,10 @@ async def get_character(name: str):
             "alliance_id": alliance_id,
             "alliance_name": alliance_name,
             "zkillboard": zkill_stats,
-            "debug_topLists": zkill_debug_raw,
+            "top_ships": top_ships,
+            "flies_with_characters": top_characters,
+            "flies_with_corporations": top_corporations,
+            "flies_with_alliances": top_alliances,
             "from_cache": False,
         }
 
