@@ -94,11 +94,31 @@
     font-weight: 500;
     text-align: right;
   }
+  .char-name-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
   .char-name {
     font-size: 20px;
     font-weight: 600;
-    margin-bottom: 10px;
     color: #fff;
+  }
+  .zkill-link {
+    color: #4f46e5;
+    font-size: 13px;
+    text-decoration: none;
+  }
+  .zkill-link:hover {
+    text-decoration: underline;
+  }
+  .fleetmate-link {
+    color: inherit;
+    text-decoration: none;
+  }
+  .fleetmate-link:hover .fleetmate-name {
+    text-decoration: underline;
   }
   .card-title {
     font-size: 13px;
@@ -135,15 +155,22 @@ function buildListRows(items) {
   if (!items || items.length === 0) {
     return `<div class="row"><span class="value">No data available</span></div>`;
   }
-  return items.map(item => `
-    <div class="row">
-      <span class="label">
-        ${item.name || 'Unknown'}
-        ${item.corporation_name ? `<span class="sublabel">${item.corporation_name}</span>` : ''}
-      </span>
-      <span class="value">${item.kills} kills</span>
-    </div>
-  `).join('');
+  return items.map(item => {
+    const nameBlock = `
+      <span class="fleetmate-name">${item.name || 'Unknown'}</span>
+      ${item.corporation_name ? `<span class="sublabel">${item.corporation_name}</span>` : ''}
+    `;
+    const label = item.character_id
+      ? `<a class="fleetmate-link" href="https://zkillboard.com/character/${item.character_id}/" target="_blank">${nameBlock}</a>`
+      : nameBlock;
+
+    return `
+      <div class="row">
+        <span class="label">${label}</span>
+        <span class="value">${item.kills} kills</span>
+      </div>
+    `;
+  }).join('');
 }
 
 async function searchCharacter() {
@@ -171,7 +198,10 @@ async function searchCharacter() {
 
     resultDiv.innerHTML = `
       <div class="card">
-        <div class="char-name">${data.name}</div>
+        <div class="char-name-row">
+          <div class="char-name">${data.name}</div>
+          <a class="zkill-link" href="${data.zkillboard_url}" target="_blank">View on zKillboard →</a>
+        </div>
         <div class="row"><span class="label">Corporation</span><span class="value">${data.corporation_name || '—'}</span></div>
         <div class="row"><span class="label">Alliance</span><span class="value">${data.alliance_name || '—'}</span></div>
         <div class="row"><span class="label">Security Status</span><span class="value">${data.security_status ?? '—'}</span></div>
