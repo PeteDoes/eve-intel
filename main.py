@@ -1,5 +1,6 @@
 import os
 import json
+from collections import Counter
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -21,6 +22,70 @@ def extract_top_list(top_lists, list_type, limit=5):
             return values[:limit]
     return []
 
+async def get_fleetmates(client, character_id, kill_limit=25):
+    """Scan recent killmails to find who this character actually flies with."""
+    try:
+        kills_resp = await client.get(
+            f"https://zkillboard.com/api/kills/characterID/{character_id}/"
+        )
+        kills_list = kills_resp.json()
+    except Exception:
+        return []
+
+    if not isinstance(kills_list, list):
+        return []
+
+    kills_to_check = kills_list[:kill_limit]
+
+    fleetmate_counter = Counter()
+
+    for kill in kills_to_check:
+        killmail_id = kill.get("killmail_id")
+        kill_hash = kill.get("zkb", {}).get("hash")
+
+        if not killmail_id or not kill_hash:
+            continue
+
+        try:
+            killmail_resp = await client.get(
+                f"https://esi.evetech.net/latest/killmails/{killmail_id}/{kill_hash}/"
+            )
+            killmail_data = killmail_resp.json()
+        except Exception:
+            continue
+
+        attackers = killmail_data.get("attackers", [])
+        for attacker in attackers:
+            attacker_id = attacker.get("character_id")
+            if attacker_id and attacker_id != character_id:
+                fleetmate_counter[attacker_id] += 1
+
+    if not fleetmate_counter:
+        return []
+
+    top_fleetmate_ids = [char_id for char_id, count in fleetmate_counter.most_common(5)]
+
+    # Resolve IDs to names
+    try:
+        names_resp = await client.post(
+            "https://esi.evetech.net/latest/universe/names/",
+            json=top_fleetmate_ids
+        )
+        names_data = names_resp.json()
+    except Exception:
+        names_data = []
+
+    id_to_name = {entry["id"]: entry["name"] for entry in names_data if "id" in entry and "name" in entry}
+
+    result = []
+    for char_id, count in fleetmate_counter.most_common(5):
+        result.append({
+            "name": id_to_name.get(char_id, f"Unknown ({char_id})"),
+            "kills": count
+        })
+
+    return result
+
 @app.get("/api/character/{name}")
 async def get_character(name: str):
     cache_key = f"character:{name.lower()}"
@@ -32,7 +97,7 @@ async def get_character(name: str):
         return result
 
     headers = {"User-Agent": "eve-intel-app (contact: your-email@example.com)"}
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0) as client:
         search_resp = await client.post(
             "https://esi.evetech.net/latest/universe/ids/",
             json=[name]
@@ -68,7 +133,6 @@ async def get_character(name: str):
 
         zkill_stats = {}
         top_ships = []
-        top_characters = []
         top_corporations = []
         top_alliances = []
 
@@ -88,20 +152,11 @@ async def get_character(name: str):
                 "gang_ratio": zkill_data.get("gangRatio"),
             }
 
-            # Preferred ships
             for ship in extract_top_list(top_lists, "shipType"):
                 top_ships.append({
                     "name": ship.get("shipName"),
                     "kills": ship.get("kills"),
                 })
-
-            # Who they fly with
-            for char in extract_top_list(top_lists, "character"):
-                if char.get("characterID") != character_id:
-                    top_characters.append({
-                        "name": char.get("characterName"),
-                        "kills": char.get("kills"),
-                    })
 
             for corp in extract_top_list(top_lists, "corporation"):
                 top_corporations.append({
@@ -117,6 +172,9 @@ async def get_character(name: str):
 
         except Exception as e:
             zkill_stats = {"error": f"Could not fetch zKillboard stats: {str(e)}"}
+
+        # Real fleetmates, found by scanning actual killmails
+        top_characters = await get_fleetmates(client, character_id, kill_limit=25)
 
         result = {
             "name": name,
