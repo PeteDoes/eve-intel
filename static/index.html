@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EVE Intel</title>
+<style>
+  body {
+    background-color: #0d0d0f;
+    color: #e6e6e6;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  header {
+    width: 100%;
+    text-align: center;
+    padding: 40px 20px 20px 20px;
+  }
+  h1 {
+    font-size: 28px;
+    margin: 0;
+    color: #f2f2f2;
+  }
+  .subtitle {
+    color: #888;
+    margin-top: 6px;
+    font-size: 14px;
+  }
+  .search-box {
+    display: flex;
+    gap: 8px;
+    width: 90%;
+    max-width: 500px;
+    margin-top: 24px;
+  }
+  input {
+    flex: 1;
+    padding: 12px 14px;
+    border-radius: 8px;
+    border: 1px solid #333;
+    background-color: #1a1a1d;
+    color: #fff;
+    font-size: 16px;
+  }
+  button {
+    padding: 12px 20px;
+    border-radius: 8px;
+    border: none;
+    background-color: #4f46e5;
+    color: white;
+    font-size: 16px;
+    cursor: pointer;
+  }
+  button:hover {
+    background-color: #4338ca;
+  }
+  #result {
+    width: 90%;
+    max-width: 500px;
+    margin-top: 30px;
+    background-color: #1a1a1d;
+    border-radius: 12px;
+    padding: 20px;
+    display: none;
+  }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid #2a2a2e;
+    font-size: 14px;
+  }
+  .row:last-child {
+    border-bottom: none;
+  }
+  .label {
+    color: #999;
+  }
+  .value {
+    color: #fff;
+    font-weight: 500;
+    text-align: right;
+  }
+  .char-name {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: #fff;
+  }
+  #loading {
+    margin-top: 20px;
+    color: #888;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>EVE Intel</h1>
+  <div class="subtitle">Character lookup for New Eden</div>
+</header>
+
+<div class="search-box">
+  <input type="text" id="nameInput" placeholder="Enter character name...">
+  <button onclick="searchCharacter()">Search</button>
+</div>
+
+<div id="loading">Searching...</div>
+
+<div id="result"></div>
+
+<script>
+async function searchCharacter() {
+  const name = document.getElementById('nameInput').value.trim();
+  if (!name) return;
+
+  const resultDiv = document.getElementById('result');
+  const loadingDiv = document.getElementById('loading');
+  resultDiv.style.display = 'none';
+  loadingDiv.style.display = 'block';
+
+  try {
+    const response = await fetch(`/api/character/${encodeURIComponent(name)}`);
+    const data = await response.json();
+
+    loadingDiv.style.display = 'none';
+    resultDiv.style.display = 'block';
+
+    if (data.error) {
+      resultDiv.innerHTML = `<div class="row"><span class="value">${data.error}</span></div>`;
+      return;
+    }
+
+    const zk = data.zkillboard || {};
+
+    resultDiv.innerHTML = `
+      <div class="char-name">${data.name}</div>
+      <div class="row"><span class="label">Corporation</span><span class="value">${data.corporation_name || '—'}</span></div>
+      <div class="row"><span class="label">Alliance</span><span class="value">${data.alliance_name || '—'}</span></div>
+      <div class="row"><span class="label">Security Status</span><span class="value">${data.security_status ?? '—'}</span></div>
+      <div class="row"><span class="label">Ships Destroyed</span><span class="value">${zk.ships_destroyed ?? '—'}</span></div>
+      <div class="row"><span class="label">Ships Lost</span><span class="value">${zk.ships_lost ?? '—'}</span></div>
+      <div class="row"><span class="label">ISK Destroyed</span><span class="value">${zk.isk_destroyed ? Math.round(zk.isk_destroyed).toLocaleString() : '—'}</span></div>
+      <div class="row"><span class="label">Danger Ratio</span><span class="value">${zk.danger_ratio ?? '—'}</span></div>
+    `;
+  } catch (err) {
+    loadingDiv.style.display = 'none';
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = `<div class="row"><span class="value">Something went wrong. Please try again.</span></div>`;
+  }
+}
+
+document.getElementById('nameInput').addEventListener('keypress', function(e) {
+  if (e.key === 'Enter') {
+    searchCharacter();
+  }
+});
+</script>
+
+</body>
+</html>
