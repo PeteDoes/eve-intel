@@ -59,8 +59,8 @@
     background-color: #4338ca;
   }
   #result {
-    width: 90%;
-    max-width: 500px;
+    width: 95%;
+    max-width: 1000px;
     margin-top: 30px;
     display: none;
   }
@@ -69,6 +69,11 @@
     border-radius: 12px;
     padding: 20px;
     margin-bottom: 16px;
+  }
+  .grid-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 16px;
   }
   .row {
     display: flex;
@@ -125,7 +130,22 @@
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: #888;
-    margin-bottom: 10px;
+    cursor: pointer;
+    list-style: none;
+  }
+  .card-title::-webkit-details-marker {
+    display: none;
+  }
+  .card-title::before {
+    content: "▸ ";
+    display: inline-block;
+    transition: transform 0.15s ease;
+  }
+  details[open] > .card-title::before {
+    content: "▾ ";
+  }
+  .card-body {
+    margin-top: 10px;
   }
   .flag-banner {
     padding: 12px 14px;
@@ -175,125 +195,125 @@
 <script>
 function buildListRows(items) {
   if (!items || items.length === 0) {
-    return `<div class="row"><span class="value">No data available</span></div>`;
+    return '<div class="row"><span class="value">No data available</span></div>';
   }
-  return items.map(item => {
-    const nameBlock = `
-      <span class="fleetmate-name">${item.name || 'Unknown'}</span>
-      ${item.corporation_name ? `<span class="sublabel">${item.corporation_name}</span>` : ''}
-    `;
-    const label = item.character_id
-      ? `<a class="fleetmate-link" href="https://zkillboard.com/character/${item.character_id}/" target="_blank">${nameBlock}</a>`
-      : nameBlock;
-
-    return `
-      <div class="row">
-        <span class="label">${label}</span>
-        <span class="value">${item.kills} kills</span>
-      </div>
-    `;
-  }).join('');
+  var rows = '';
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var nameBlock = '<span class="fleetmate-name">' + (item.name || 'Unknown') + '</span>';
+    if (item.corporation_name) {
+      nameBlock += '<span class="sublabel">' + item.corporation_name + '</span>';
+    }
+    var label = nameBlock;
+    if (item.character_id) {
+      label = '<a class="fleetmate-link" href="https://zkillboard.com/character/' + item.character_id + '/" target="_blank">' + nameBlock + '</a>';
+    }
+    rows += '<div class="row"><span class="label">' + label + '</span><span class="value">' + item.kills + ' kills</span></div>';
+  }
+  return rows;
 }
 
 function buildEmploymentRows(history) {
   if (!history || history.length === 0) {
-    return `<div class="row"><span class="value">No data available</span></div>`;
+    return '<div class="row"><span class="value">No data available</span></div>';
   }
-  return history.map(entry => {
-    const durationText = entry.duration_days !== null && entry.duration_days !== undefined
-      ? `${entry.duration_days} days`
-      : 'Unknown';
-    return `
-      <div class="row">
-        <span class="label">
-          ${entry.corporation_name}${entry.is_deleted ? ' (defunct)' : ''}
-          <span class="sublabel">${entry.start_date ? entry.start_date.split('T')[0] : ''} → ${entry.end_date}</span>
-        </span>
-        <span class="value">${durationText}</span>
-      </div>
-    `;
-  }).join('');
+  var rows = '';
+  for (var i = 0; i < history.length; i++) {
+    var entry = history[i];
+    var durationText = (entry.duration_days !== null && entry.duration_days !== undefined) ? (entry.duration_days + ' days') : 'Unknown';
+    var startDate = entry.start_date ? entry.start_date.split('T')[0] : '';
+    rows += '<div class="row"><span class="label">' + entry.corporation_name + (entry.is_deleted ? ' (defunct)' : '') +
+      '<span class="sublabel">' + startDate + ' \u2192 ' + entry.end_date + '</span></span>' +
+      '<span class="value">' + durationText + '</span></div>';
+  }
+  return rows;
 }
 
 function buildCorpHopBanner(analysis) {
   if (!analysis) return '';
-  let flagClass = 'flag-ok';
+  var flagClass = 'flag-ok';
   if (analysis.is_flagged) {
     flagClass = 'flag-danger';
   } else if (analysis.short_stint_count > 0) {
     flagClass = 'flag-neutral';
   }
-  return `<div class="flag-banner ${flagClass}">${analysis.reason}</div>`;
+  return '<div class="flag-banner ' + flagClass + '">' + analysis.reason + '</div>';
 }
 
 async function searchCharacter() {
-  const name = document.getElementById('nameInput').value.trim();
+  var name = document.getElementById('nameInput').value.trim();
   if (!name) return;
 
-  const resultDiv = document.getElementById('result');
-  const loadingDiv = document.getElementById('loading');
+  var resultDiv = document.getElementById('result');
+  var loadingDiv = document.getElementById('loading');
   resultDiv.style.display = 'none';
   loadingDiv.style.display = 'block';
 
   try {
-    const response = await fetch(`/api/character/${encodeURIComponent(name)}`);
-    const data = await response.json();
+    var response = await fetch('/api/character/' + encodeURIComponent(name));
+    var data = await response.json();
 
     loadingDiv.style.display = 'none';
     resultDiv.style.display = 'block';
 
     if (data.error) {
-      resultDiv.innerHTML = `<div class="card"><div class="row"><span class="value">${data.error}</span></div></div>`;
+      resultDiv.innerHTML = '<div class="card"><div class="row"><span class="value">' + data.error + '</span></div></div>';
       return;
     }
 
-    const zk = data.zkillboard || {};
+    var zk = data.zkillboard || {};
 
-    resultDiv.innerHTML = `
-      <div class="card">
-        <div class="char-name-row">
-          <div class="char-name">${data.name}</div>
-          <a class="zkill-link" href="${data.zkillboard_url}" target="_blank">View on zKillboard →</a>
-        </div>
-        <div class="row"><span class="label">Corporation</span><span class="value">${data.corporation_name || '—'}</span></div>
-        <div class="row"><span class="label">Alliance</span><span class="value">${data.alliance_name || '—'}</span></div>
-        <div class="row"><span class="label">Security Status</span><span class="value">${data.security_status ?? '—'}</span></div>
-        <div class="row"><span class="label">Ships Destroyed</span><span class="value">${zk.ships_destroyed ?? '—'}</span></div>
-        <div class="row"><span class="label">Ships Lost</span><span class="value">${zk.ships_lost ?? '—'}</span></div>
-        <div class="row"><span class="label">ISK Destroyed</span><span class="value">${zk.isk_destroyed ? Math.round(zk.isk_destroyed).toLocaleString() : '—'}</span></div>
-        <div class="row"><span class="label">Danger Ratio</span><span class="value">${zk.danger_ratio ?? '—'}</span></div>
-      </div>
+    var mainCard = '<div class="card">' +
+      '<div class="char-name-row">' +
+        '<div class="char-name">' + data.name + '</div>' +
+        '<a class="zkill-link" href="' + data.zkillboard_url + '" target="_blank">View on zKillboard \u2192</a>' +
+      '</div>' +
+      '<div class="row"><span class="label">Corporation</span><span class="value">' + (data.corporation_name || '\u2014') + '</span></div>' +
+      '<div class="row"><span class="label">Alliance</span><span class="value">' + (data.alliance_name || '\u2014') + '</span></div>' +
+      '<div class="row"><span class="label">Security Status</span><span class="value">' + (data.security_status ?? '\u2014') + '</span></div>' +
+      '<div class="row"><span class="label">Ships Destroyed</span><span class="value">' + (zk.ships_destroyed ?? '\u2014') + '</span></div>' +
+      '<div class="row"><span class="label">Ships Lost</span><span class="value">' + (zk.ships_lost ?? '\u2014') + '</span></div>' +
+      '<div class="row"><span class="label">ISK Destroyed</span><span class="value">' + (zk.isk_destroyed ? Math.round(zk.isk_destroyed).toLocaleString() : '\u2014') + '</span></div>' +
+      '<div class="row"><span class="label">Danger Ratio</span><span class="value">' + (zk.danger_ratio ?? '\u2014') + '</span></div>' +
+    '</div>';
 
-      <div class="card">
-        <div class="card-title">Employment History &amp; Corp-Hopping Check</div>
-        ${buildCorpHopBanner(data.corp_hop_analysis)}
-        ${buildEmploymentRows(data.employment_history)}
-      </div>
+    var gridCards = '<div class="grid-cards">' +
 
-      <div class="card">
-        <div class="card-title">Preferred Ships (Recent Activity)</div>
-        ${buildListRows(data.top_ships)}
-      </div>
+      '<details class="card" open>' +
+        '<summary class="card-title">Employment History &amp; Corp-Hopping Check</summary>' +
+        '<div class="card-body">' +
+          buildCorpHopBanner(data.corp_hop_analysis) +
+          buildEmploymentRows(data.employment_history) +
+        '</div>' +
+      '</details>' +
 
-      <div class="card">
-        <div class="card-title">Frequently Flies With — Alliances (Recent Activity)</div>
-        ${buildListRows(data.flies_with_alliances)}
-      </div>
+      '<details class="card" open>' +
+        '<summary class="card-title">Preferred Ships (Recent Activity)</summary>' +
+        '<div class="card-body">' + buildListRows(data.top_ships) + '</div>' +
+      '</details>' +
 
-      <div class="card">
-        <div class="card-title">Frequently Flies With — Corporations (Recent Activity)</div>
-        ${buildListRows(data.flies_with_corporations)}
-      </div>
+      '<details class="card" open>' +
+        '<summary class="card-title">Frequently Flies With \u2014 Alliances (Recent Activity)</summary>' +
+        '<div class="card-body">' + buildListRows(data.flies_with_alliances) + '</div>' +
+      '</details>' +
 
-      <div class="card">
-        <div class="card-title">Frequently Flies With — Characters (Recent Activity)</div>
-        ${buildListRows(data.flies_with_characters)}
-      </div>
-    `;
+      '<details class="card" open>' +
+        '<summary class="card-title">Frequently Flies With \u2014 Corporations (Recent Activity)</summary>' +
+        '<div class="card-body">' + buildListRows(data.flies_with_corporations) + '</div>' +
+      '</details>' +
+
+      '<details class="card">' +
+        '<summary class="card-title">Frequently Flies With \u2014 Characters (Recent Activity)</summary>' +
+        '<div class="card-body">' + buildListRows(data.flies_with_characters) + '</div>' +
+      '</details>' +
+
+    '</div>';
+
+    resultDiv.innerHTML = mainCard + gridCards;
   } catch (err) {
     loadingDiv.style.display = 'none';
     resultDiv.style.display = 'block';
-    resultDiv.innerHTML = `<div class="card"><div class="row"><span class="value">Something went wrong. Please try again.</span></div></div>`;
+    resultDiv.innerHTML = '<div class="card"><div class="row"><span class="value">Something went wrong. Please try again.</span></div></div>';
   }
 }
 
