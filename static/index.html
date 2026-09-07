@@ -253,3 +253,56 @@ async function searchCharacter() {
       <div class="card">
         <div class="char-name-row">
           <div class="char-name">${data.name}</div>
+          <a class="zkill-link" href="${data.zkillboard_url}" target="_blank">View on zKillboard →</a>
+        </div>
+        <div class="row"><span class="label">Corporation</span><span class="value">${data.corporation_name || '—'}</span></div>
+        <div class="row"><span class="label">Alliance</span><span class="value">${data.alliance_name || '—'}</span></div>
+        <div class="row"><span class="label">Security Status</span><span class="value">${data.security_status ?? '—'}</span></div>
+        <div class="row"><span class="label">Ships Destroyed</span><span class="value">${zk.ships_destroyed ?? '—'}</span></div>
+        <div class="row"><span class="label">Ships Lost</span><span class="value">${zk.ships_lost ?? '—'}</span></div>
+        <div class="row"><span class="label">ISK Destroyed</span><span class="value">${zk.isk_destroyed ? Math.round(zk.isk_destroyed).toLocaleString() : '—'}</span></div>
+        <div class="row"><span class="label">Danger Ratio</span><span class="value">${zk.danger_ratio ?? '—'}</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Employment History &amp; Corp-Hopping Check</div>
+        ${buildCorpHopBanner(data.corp_hop_analysis)}
+        ${buildEmploymentRows(data.employment_history)}
+      </div>
+
+      <div class="card">
+        <div class="card-title">Preferred Ships (Recent Activity)</div>
+        ${buildListRows(data.top_ships)}
+      </div>
+
+      <div class="card">
+        <div class="card-title">Frequently Flies With — Alliances (Recent Activity)</div>
+        ${buildListRows(data.flies_with_alliances)}
+      </div>
+
+      <div class="card">
+        <div class="card-title">Frequently Flies With — Corporations (Recent Activity)</div>
+        ${buildListRows(data.flies_with_corporations)}
+      </div>
+
+      <div class="card">
+        <div class="card-title">Frequently Flies With — Characters (Recent Activity)</div>
+        ${buildListRows(data.flies_with_characters)}
+      </div>
+    `;
+  } catch (err) {
+    loadingDiv.style.display = 'none';
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = `<div class="card"><div class="row"><span class="value">Something went wrong. Please try again.</span></div></div>`;
+  }
+}
+
+document.getElementById('nameInput').addEventListener('keypress', function(e) {
+  if (e.key === 'Enter') {
+    searchCharacter();
+  }
+});
+</script>
+
+</body>
+</html>
