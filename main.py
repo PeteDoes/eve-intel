@@ -24,23 +24,21 @@ def extract_top_list(top_lists, list_type, limit=5):
 
 async def get_fleetmates(client, character_id, kill_limit=25, name_limit=15):
     """Scan recent killmails to find who this character actually flies with, plus their corp."""
-    debug_info = {}
     try:
         kills_resp = await client.get(
             f"https://zkillboard.com/api/kills/characterID/{character_id}/"
         )
         kills_list = kills_resp.json()
-    except Exception as e:
-        return [], {"error": f"Could not fetch kills list: {str(e)}"}
+    except Exception:
+        return []
 
     if not isinstance(kills_list, list):
-        return [], {"error": "Kills list was not a list", "raw": str(kills_list)[:300]}
+        return []
 
     kills_to_check = kills_list[:kill_limit]
 
     fleetmate_counter = Counter()
     fleetmate_corp_id = {}
-    sample_attacker = None
 
     for kill in kills_to_check:
         killmail_id = kill.get("killmail_id")
@@ -61,18 +59,13 @@ async def get_fleetmates(client, character_id, kill_limit=25, name_limit=15):
         for attacker in attackers:
             attacker_id = attacker.get("character_id")
             if attacker_id and attacker_id != character_id:
-                if sample_attacker is None:
-                    sample_attacker = attacker
                 fleetmate_counter[attacker_id] += 1
                 corp_id = attacker.get("corporation_id")
                 if corp_id:
                     fleetmate_corp_id[attacker_id] = corp_id
 
-    debug_info["sample_attacker_raw"] = sample_attacker
-    debug_info["fleetmate_corp_id_map_sample"] = dict(list(fleetmate_corp_id.items())[:5])
-
     if not fleetmate_counter:
-        return [], debug_info
+        return []
 
     top_fleetmate_ids = [char_id for char_id, count in fleetmate_counter.most_common(name_limit)]
 
@@ -82,14 +75,12 @@ async def get_fleetmates(client, character_id, kill_limit=25, name_limit=15):
             json=top_fleetmate_ids
         )
         names_data = names_resp.json()
-    except Exception as e:
+    except Exception:
         names_data = []
-        debug_info["names_error"] = str(e)
 
     id_to_name = {entry["id"]: entry["name"] for entry in names_data if "id" in entry and "name" in entry}
 
     unique_corp_ids = list(set(fleetmate_corp_id.values()))
-    debug_info["unique_corp_ids"] = unique_corp_ids
     corp_id_to_name = {}
     if unique_corp_ids:
         try:
@@ -98,21 +89,21 @@ async def get_fleetmates(client, character_id, kill_limit=25, name_limit=15):
                 json=unique_corp_ids
             )
             corp_names_data = corp_names_resp.json()
-            debug_info["corp_names_raw_response"] = corp_names_data
             corp_id_to_name = {entry["id"]: entry["name"] for entry in corp_names_data if "id" in entry and "name" in entry}
-        except Exception as e:
-            debug_info["corp_names_error"] = str(e)
+        except Exception:
+            corp_id_to_name = {}
 
     result = []
     for char_id, count in fleetmate_counter.most_common(name_limit):
         corp_id = fleetmate_corp_id.get(char_id)
         result.append({
             "name": id_to_name.get(char_id, f"Unknown ({char_id})"),
+            "character_id": char_id,
             "corporation_name": corp_id_to_name.get(corp_id, "Unknown"),
             "kills": count
         })
 
-    return result, debug_info
+    return result
 
 @app.get("/api/character/{name}")
 async def get_character(name: str):
@@ -201,12 +192,12 @@ async def get_character(name: str):
         except Exception as e:
             zkill_stats = {"error": f"Could not fetch zKillboard stats: {str(e)}"}
 
-        # Real fleetmates, found by scanning actual killmails
-        top_characters, fleetmate_debug = await get_fleetmates(client, character_id, kill_limit=25, name_limit=15)
+        top_characters = await get_fleetmates(client, character_id, kill_limit=25, name_limit=15)
 
         result = {
             "name": name,
             "character_id": character_id,
+            "zkillboard_url": f"https://zkillboard.com/character/{character_id}/",
             "security_status": details.get("security_status"),
             "birthday": details.get("birthday"),
             "corporation_id": corporation_id,
@@ -218,7 +209,6 @@ async def get_character(name: str):
             "flies_with_characters": top_characters,
             "flies_with_corporations": top_corporations,
             "flies_with_alliances": top_alliances,
-            "debug_fleetmate_info": fleetmate_debug,
             "from_cache": False,
         }
 
