@@ -9,7 +9,8 @@ def read_root():
 
 @app.get("/character/{name}")
 async def get_character(name: str):
-    async with httpx.AsyncClient() as client:
+    headers = {"User-Agent": "eve-intel-app (contact: your-email@example.com)"}
+    async with httpx.AsyncClient(headers=headers) as client:
         # Step 1: Convert the character name into an ID
         search_resp = await client.post(
             "https://esi.evetech.net/latest/universe/ids/",
@@ -37,8 +38,7 @@ async def get_character(name: str):
             corp_resp = await client.get(
                 f"https://esi.evetech.net/latest/corporations/{corporation_id}/"
             )
-            corp_data = corp_resp.json()
-            corp_name = corp_data.get("name")
+            corp_name = corp_resp.json().get("name")
 
         # Step 4: Get the alliance name (if they're in one)
         alliance_name = None
@@ -46,8 +46,25 @@ async def get_character(name: str):
             alliance_resp = await client.get(
                 f"https://esi.evetech.net/latest/alliances/{alliance_id}/"
             )
-            alliance_data = alliance_resp.json()
-            alliance_name = alliance_data.get("name")
+            alliance_name = alliance_resp.json().get("name")
+
+        # Step 5: Get zKillboard stats
+        zkill_stats = {}
+        try:
+            zkill_resp = await client.get(
+                f"https://zkillboard.com/api/stats/characterID/{character_id}/"
+            )
+            zkill_data = zkill_resp.json()
+            zkill_stats = {
+                "ships_destroyed": zkill_data.get("shipsDestroyed"),
+                "ships_lost": zkill_data.get("shipsLost"),
+                "isk_destroyed": zkill_data.get("iskDestroyed"),
+                "isk_lost": zkill_data.get("iskLost"),
+                "danger_ratio": zkill_data.get("dangerRatio"),
+                "gang_ratio": zkill_data.get("gangRatio"),
+            }
+        except Exception:
+            zkill_stats = {"error": "Could not fetch zKillboard stats"}
 
         return {
             "name": name,
@@ -58,4 +75,5 @@ async def get_character(name: str):
             "corporation_name": corp_name,
             "alliance_id": alliance_id,
             "alliance_name": alliance_name,
+            "zkillboard": zkill_stats,
         }
