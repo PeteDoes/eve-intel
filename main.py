@@ -48,23 +48,18 @@ async def get_character(name: str):
             )
             alliance_name = alliance_resp.json().get("name")
 
-        # Step 5: Get zKillboard stats
+        # Step 5: Get zKillboard stats (debug version)
         zkill_stats = {}
         try:
             zkill_resp = await client.get(
                 f"https://zkillboard.com/api/stats/characterID/{character_id}/"
             )
-            zkill_data = zkill_resp.json()
             zkill_stats = {
-                "ships_destroyed": zkill_data.get("shipsDestroyed"),
-                "ships_lost": zkill_data.get("shipsLost"),
-                "isk_destroyed": zkill_data.get("iskDestroyed"),
-                "isk_lost": zkill_data.get("iskLost"),
-                "danger_ratio": zkill_data.get("dangerRatio"),
-                "gang_ratio": zkill_data.get("gangRatio"),
+                "debug_status_code": zkill_resp.status_code,
+                "debug_raw_text": zkill_resp.text[:500],
             }
-        except Exception:
-            zkill_stats = {"error": "Could not fetch zKillboard stats"}
+        except Exception as e:
+            zkill_stats = {"error": f"Exception occurred: {str(e)}"}
 
         return {
             "name": name,
