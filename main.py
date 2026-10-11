@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 import httpx
 import redis.asyncio as redis
 
@@ -500,5 +501,137 @@ async def corp_activity(name: str, since: str):
             await redis_client.set(cache_key, json.dumps(result), ex=600)
 
         return result
+
+# ---------------------------------------------------------------
+# Bulk check: paste a list of names, see who is in a given corp
+# ---------------------------------------------------------------
+
+class BulkRequest(BaseModel):
+    names: list[str]
+    corp: str = ""
+
+@app.post("/api/bulk-check")
+async def bulk_check(req: BulkRequest):
+    # Clean the list: trim spaces, drop blanks, drop duplicates
+    seen = set()
+    names = []
+    for raw in req.names:
+        n = raw.strip()
+        if n and n.lower() not in seen:
+            seen.add(n.lower())
+            names.append(n)
+
+    if not names:
+        return {"error": "Please paste at least one character name."}
+
+    truncated = False
+    if len(names) > 1000:
+        names = names[:1000]
+        truncated = True
+
+    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=60.0) as client:
+        # Step 1: find the corp we are checking against (optional)
+        target_corp_id = None
+        target_corp_name = None
+        corp_query = req.corp.strip()
+        if corp_query:
+            try:
+                corp_resp = await client.post(
+                    "https://esi.evetech.net/latest/universe/ids/",
+                    json=[corp_query]
+                )
+                corp_data = corp_resp.json()
+            except Exception as e:
+                return {"error": f"Could not look up the corporation: {str(e)}"}
+            corps = corp_data.get("corporations") or []
+            if not corps:
+                return {"error": f"No corporation found with name '{corp_query}'"}
+            target_corp_id = corps[0]["id"]
+            target_corp_name = corps[0]["name"]
+
+        # Step 2: turn names into character IDs (500 names per request)
+        found = {}  # character_id -> proper name
+        for start in range(0, len(names), 500):
+            chunk = names[start:start + 500]
+            try:
+                resp = await client.post(
+                    "https://esi.evetech.net/latest/universe/ids/",
+                    json=chunk
+                )
+            except Exception as e:
+                return {"error": f"Could not reach EVE's servers: {str(e)}"}
+            if resp.status_code != 200:
+                return {"error": f"EVE's servers rejected the name list: {resp.text[:200]}"}
+            data = resp.json()
+            for c in data.get("characters", []):
+                found[c["id"]] = c["name"]
+
+        found_lower = set(n.lower() for n in found.values())
+        not_found = [n for n in names if n.lower() not in found_lower]
+
+        if not found:
+            return {
+                "target_corp": target_corp_name,
+                "total_names": len(names),
+                "found_count": 0,
+                "match_count": 0,
+                "matches": [],
+                "others": [],
+                "not_found": not_found,
+                "truncated": truncated,
+            }
+
+        # Step 3: look up the current corp and alliance of every character
+        char_ids = list(found.keys())
+        affiliations = []
+        for start in range(0, len(char_ids), 1000):
+            chunk = char_ids[start:start + 1000]
+            try:
+                resp = await client.post(
+                    "https://esi.evetech.net/latest/characters/affiliation/",
+                    json=chunk
+                )
+            except Exception as e:
+                return {"error": f"Could not look up corporations: {str(e)}"}
+            if resp.status_code != 200:
+                return {"error": f"EVE's servers could not return corporations: {resp.text[:200]}"}
+            affiliations.extend(resp.json())
+
+        # Step 4: turn corp and alliance IDs into names
+        corp_ids = [a.get("corporation_id") for a in affiliations]
+        alliance_ids = [a.get("alliance_id") for a in affiliations]
+        id_to_name = await resolve_names(client, corp_ids + alliance_ids)
+
+        matches = []
+        others = []
+        for a in affiliations:
+            char_id = a.get("character_id")
+            corp_id = a.get("corporation_id")
+            alliance_id = a.get("alliance_id")
+            row = {
+                "name": found.get(char_id, f"Unknown ({char_id})"),
+                "character_id": char_id,
+                "zkillboard_url": f"https://zkillboard.com/character/{char_id}/",
+                "corporation_name": id_to_name.get(corp_id, f"Unknown ({corp_id})"),
+                "alliance_name": id_to_name.get(alliance_id) if alliance_id else None,
+            }
+            if target_corp_id and corp_id == target_corp_id:
+                matches.append(row)
+            else:
+                others.append(row)
+
+        matches.sort(key=lambda r: r["name"].lower())
+        others.sort(key=lambda r: (r["corporation_name"].lower(), r["name"].lower()))
+
+        return {
+            "target_corp": target_corp_name,
+            "total_names": len(names),
+            "found_count": len(found),
+            "match_count": len(matches),
+            "matches": matches,
+            "others": others,
+            "not_found": not_found,
+            "truncated": truncated,
+        }
 
 app.mount("/", StaticFiles(directory="static"), name="static")
