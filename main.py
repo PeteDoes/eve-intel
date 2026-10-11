@@ -314,6 +314,8 @@ async def get_character(name: str):
 # Corp activity report: who lost ships / got kills since a date
 # ---------------------------------------------------------------
 
+MAX_PAGES = 3  # each page is up to 200 killmails, newest first
+
 async def fetch_killmail(client, semaphore, km_ref):
     """Fetch one full killmail from ESI (limited to a few at a time)."""
     killmail_id = km_ref.get("killmail_id")
@@ -331,18 +333,49 @@ async def fetch_killmail(client, semaphore, km_ref):
         except Exception:
             return None
 
-async def fetch_zkill_list(client, kind, corp_id, start_time):
-    """kind is 'losses' or 'kills'. Returns up to 200 most recent killmail references."""
-    try:
-        resp = await client.get(
-            f"https://zkillboard.com/api/{kind}/corporationID/{corp_id}/startTime/{start_time}/"
-        )
-        data = resp.json()
-        if isinstance(data, list):
-            return data[:200]
-    except Exception:
-        pass
-    return []
+async def collect_killmails(client, semaphore, kind, corp_id, since):
+    """
+    Pull pages of the corp's newest killmails (kind is 'losses' or 'kills'),
+    stopping once we pass the start date.
+    Returns (killmails_since_date, capped, error_message).
+    """
+    collected = []
+    capped = False
+
+    for page in range(1, MAX_PAGES + 1):
+        try:
+            resp = await client.get(
+                f"https://zkillboard.com/api/{kind}/corporationID/{corp_id}/page/{page}/"
+            )
+            refs = resp.json()
+        except Exception as e:
+            return collected, capped, f"Could not reach zKillboard ({kind}): {str(e)}"
+
+        if isinstance(refs, dict):
+            message = refs.get("error") or str(refs)[:200]
+            return collected, capped, f"zKillboard said: {message}"
+
+        if not isinstance(refs, list) or len(refs) == 0:
+            break
+
+        killmails = await asyncio.gather(*[fetch_killmail(client, semaphore, ref) for ref in refs])
+        killmails = [km for km in killmails if km]
+
+        reached_start_date = False
+        for km in killmails:
+            km_date = km.get("killmail_time", "")[:10]
+            if km_date >= since:
+                collected.append(km)
+            else:
+                reached_start_date = True
+
+        if reached_start_date or len(refs) < 200:
+            break
+
+        if page == MAX_PAGES:
+            capped = True
+
+    return collected, capped, None
 
 @app.get("/api/corp-activity")
 async def corp_activity(name: str, since: str):
@@ -352,14 +385,12 @@ async def corp_activity(name: str, since: str):
     except Exception:
         return {"error": "Please enter a valid start date."}
 
-    cache_key = f"corpactivity:{name.lower()}:{since}"
+    cache_key = f"corpactivity2:{name.lower()}:{since}"
     cached = await redis_client.get(cache_key)
     if cached:
         result = json.loads(cached)
         result["from_cache"] = True
         return result
-
-    start_time = since.replace("-", "") + "0000"
 
     async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=60.0) as client:
         # Step 1: find the corp ID
@@ -375,18 +406,16 @@ async def corp_activity(name: str, since: str):
         corp_id = search_data["corporations"][0]["id"]
         corp_name = search_data["corporations"][0]["name"]
 
-        # Step 2: get the lists of losses and kills from zKillboard
-        losses_refs, kills_refs = await asyncio.gather(
-            fetch_zkill_list(client, "losses", corp_id, start_time),
-            fetch_zkill_list(client, "kills", corp_id, start_time),
+        # Step 2: collect losses and kills since the start date
+        semaphore = asyncio.Semaphore(10)
+        (loss_killmails, losses_capped, loss_error), (kill_killmails, kills_capped, kill_error) = await asyncio.gather(
+            collect_killmails(client, semaphore, "losses", corp_id, since),
+            collect_killmails(client, semaphore, "kills", corp_id, since),
         )
 
-        # Step 3: fetch each full killmail from ESI (10 at a time)
-        semaphore = asyncio.Semaphore(10)
-        loss_killmails, kill_killmails = await asyncio.gather(
-            asyncio.gather(*[fetch_killmail(client, semaphore, ref) for ref in losses_refs]),
-            asyncio.gather(*[fetch_killmail(client, semaphore, ref) for ref in kills_refs]),
-        )
+        # If zKillboard errored and we got nothing, show the real reason
+        if loss_error and kill_error and not loss_killmails and not kill_killmails:
+            return {"error": loss_error}
 
         pilots = {}
 
@@ -403,11 +432,7 @@ async def corp_activity(name: str, since: str):
 
         losses_counted = 0
         for km in loss_killmails:
-            if not km:
-                continue
             km_date = km.get("killmail_time", "")[:10]
-            if km_date < since:
-                continue
             victim = km.get("victim", {})
             if victim.get("corporation_id") == corp_id and victim.get("character_id"):
                 pilot = get_pilot(victim["character_id"])
@@ -420,11 +445,6 @@ async def corp_activity(name: str, since: str):
 
         kills_counted = 0
         for km in kill_killmails:
-            if not km:
-                continue
-            km_date = km.get("killmail_time", "")[:10]
-            if km_date < since:
-                continue
             counted_this_km = False
             for attacker in km.get("attackers", []):
                 if attacker.get("corporation_id") == corp_id and attacker.get("character_id"):
@@ -434,7 +454,7 @@ async def corp_activity(name: str, since: str):
             if counted_this_km:
                 kills_counted += 1
 
-        # Step 4: turn IDs into names
+        # Step 3: turn IDs into names
         char_ids = list(pilots.keys())
         all_ship_ids = []
         for pilot in pilots.values():
@@ -469,13 +489,15 @@ async def corp_activity(name: str, since: str):
             "since": since,
             "losses_counted": losses_counted,
             "kills_counted": kills_counted,
-            "losses_capped": len(losses_refs) >= 200,
-            "kills_capped": len(kills_refs) >= 200,
+            "losses_capped": losses_capped,
+            "kills_capped": kills_capped,
             "pilots": pilot_list,
             "from_cache": False,
         }
 
-        await redis_client.set(cache_key, json.dumps(result), ex=600)
+        # Only cache clean results, so a temporary error isn't remembered
+        if not loss_error and not kill_error:
+            await redis_client.set(cache_key, json.dumps(result), ex=600)
 
         return result
 
