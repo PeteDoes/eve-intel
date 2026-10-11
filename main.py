@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 from collections import Counter
 from datetime import datetime, timezone
 from fastapi import FastAPI
@@ -12,6 +13,8 @@ app = FastAPI()
 
 redis_client = redis.from_url(os.environ.get("REDIS_URL"), decode_responses=True)
 
+HEADERS = {"User-Agent": "eve-intel-app (contact: your-email@example.com)"}
+
 @app.get("/")
 def read_root():
     return FileResponse("static/index.html")
@@ -22,6 +25,26 @@ def extract_top_list(top_lists, list_type, limit=5):
             values = entry.get("values", [])
             return values[:limit]
     return []
+
+async def resolve_names(client, ids):
+    """Turn a list of EVE IDs (characters, ships, etc.) into a {id: name} lookup."""
+    unique_ids = list(set(i for i in ids if i))
+    mapping = {}
+    for start in range(0, len(unique_ids), 500):
+        chunk = unique_ids[start:start + 500]
+        try:
+            resp = await client.post(
+                "https://esi.evetech.net/latest/universe/names/",
+                json=chunk
+            )
+            data = resp.json()
+            if isinstance(data, list):
+                for entry in data:
+                    if "id" in entry and "name" in entry:
+                        mapping[entry["id"]] = entry["name"]
+        except Exception:
+            pass
+    return mapping
 
 async def get_employment_history(client, character_id):
     """Get the character's full corporation history with dates."""
@@ -37,18 +60,7 @@ async def get_employment_history(client, character_id):
         return []
 
     corp_ids = list(set(entry.get("corporation_id") for entry in history_data if entry.get("corporation_id")))
-
-    corp_id_to_name = {}
-    if corp_ids:
-        try:
-            names_resp = await client.post(
-                "https://esi.evetech.net/latest/universe/names/",
-                json=corp_ids
-            )
-            names_data = names_resp.json()
-            corp_id_to_name = {entry["id"]: entry["name"] for entry in names_data if "id" in entry and "name" in entry}
-        except Exception:
-            corp_id_to_name = {}
+    corp_id_to_name = await resolve_names(client, corp_ids)
 
     history_data.sort(key=lambda entry: entry.get("start_date", ""), reverse=True)
 
@@ -169,30 +181,8 @@ async def get_fleetmates(client, character_id, kill_limit=25, name_limit=15):
         return []
 
     top_fleetmate_ids = [char_id for char_id, count in fleetmate_counter.most_common(name_limit)]
-
-    try:
-        names_resp = await client.post(
-            "https://esi.evetech.net/latest/universe/names/",
-            json=top_fleetmate_ids
-        )
-        names_data = names_resp.json()
-    except Exception:
-        names_data = []
-
-    id_to_name = {entry["id"]: entry["name"] for entry in names_data if "id" in entry and "name" in entry}
-
-    unique_corp_ids = list(set(fleetmate_corp_id.values()))
-    corp_id_to_name = {}
-    if unique_corp_ids:
-        try:
-            corp_names_resp = await client.post(
-                "https://esi.evetech.net/latest/universe/names/",
-                json=unique_corp_ids
-            )
-            corp_names_data = corp_names_resp.json()
-            corp_id_to_name = {entry["id"]: entry["name"] for entry in corp_names_data if "id" in entry and "name" in entry}
-        except Exception:
-            corp_id_to_name = {}
+    id_to_name = await resolve_names(client, top_fleetmate_ids)
+    corp_id_to_name = await resolve_names(client, list(set(fleetmate_corp_id.values())))
 
     result = []
     for char_id, count in fleetmate_counter.most_common(name_limit):
@@ -216,8 +206,7 @@ async def get_character(name: str):
         result["from_cache"] = True
         return result
 
-    headers = {"User-Agent": "eve-intel-app (contact: your-email@example.com)"}
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0) as client:
+    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=30.0) as client:
         search_resp = await client.post(
             "https://esi.evetech.net/latest/universe/ids/",
             json=[name]
@@ -314,6 +303,175 @@ async def get_character(name: str):
             "flies_with_alliances": top_alliances,
             "employment_history": employment_history,
             "corp_hop_analysis": corp_hop_analysis,
+            "from_cache": False,
+        }
+
+        await redis_client.set(cache_key, json.dumps(result), ex=600)
+
+        return result
+
+# ---------------------------------------------------------------
+# Corp activity report: who lost ships / got kills since a date
+# ---------------------------------------------------------------
+
+async def fetch_killmail(client, semaphore, km_ref):
+    """Fetch one full killmail from ESI (limited to a few at a time)."""
+    killmail_id = km_ref.get("killmail_id")
+    kill_hash = km_ref.get("zkb", {}).get("hash")
+    if not killmail_id or not kill_hash:
+        return None
+    async with semaphore:
+        try:
+            resp = await client.get(
+                f"https://esi.evetech.net/latest/killmails/{killmail_id}/{kill_hash}/"
+            )
+            if resp.status_code != 200:
+                return None
+            return resp.json()
+        except Exception:
+            return None
+
+async def fetch_zkill_list(client, kind, corp_id, start_time):
+    """kind is 'losses' or 'kills'. Returns up to 200 most recent killmail references."""
+    try:
+        resp = await client.get(
+            f"https://zkillboard.com/api/{kind}/corporationID/{corp_id}/startTime/{start_time}/"
+        )
+        data = resp.json()
+        if isinstance(data, list):
+            return data[:200]
+    except Exception:
+        pass
+    return []
+
+@app.get("/api/corp-activity")
+async def corp_activity(name: str, since: str):
+    # Check the date looks right (YYYY-MM-DD)
+    try:
+        datetime.strptime(since, "%Y-%m-%d")
+    except Exception:
+        return {"error": "Please enter a valid start date."}
+
+    cache_key = f"corpactivity:{name.lower()}:{since}"
+    cached = await redis_client.get(cache_key)
+    if cached:
+        result = json.loads(cached)
+        result["from_cache"] = True
+        return result
+
+    start_time = since.replace("-", "") + "0000"
+
+    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=60.0) as client:
+        # Step 1: find the corp ID
+        search_resp = await client.post(
+            "https://esi.evetech.net/latest/universe/ids/",
+            json=[name]
+        )
+        search_data = search_resp.json()
+
+        if "corporations" not in search_data or len(search_data["corporations"]) == 0:
+            return {"error": f"No corporation found with name '{name}'"}
+
+        corp_id = search_data["corporations"][0]["id"]
+        corp_name = search_data["corporations"][0]["name"]
+
+        # Step 2: get the lists of losses and kills from zKillboard
+        losses_refs, kills_refs = await asyncio.gather(
+            fetch_zkill_list(client, "losses", corp_id, start_time),
+            fetch_zkill_list(client, "kills", corp_id, start_time),
+        )
+
+        # Step 3: fetch each full killmail from ESI (10 at a time)
+        semaphore = asyncio.Semaphore(10)
+        loss_killmails, kill_killmails = await asyncio.gather(
+            asyncio.gather(*[fetch_killmail(client, semaphore, ref) for ref in losses_refs]),
+            asyncio.gather(*[fetch_killmail(client, semaphore, ref) for ref in kills_refs]),
+        )
+
+        pilots = {}
+
+        def get_pilot(char_id):
+            if char_id not in pilots:
+                pilots[char_id] = {
+                    "character_id": char_id,
+                    "losses": 0,
+                    "kills": 0,
+                    "ship_ids": Counter(),
+                    "last_loss": "",
+                }
+            return pilots[char_id]
+
+        losses_counted = 0
+        for km in loss_killmails:
+            if not km:
+                continue
+            km_date = km.get("killmail_time", "")[:10]
+            if km_date < since:
+                continue
+            victim = km.get("victim", {})
+            if victim.get("corporation_id") == corp_id and victim.get("character_id"):
+                pilot = get_pilot(victim["character_id"])
+                pilot["losses"] += 1
+                if victim.get("ship_type_id"):
+                    pilot["ship_ids"][victim["ship_type_id"]] += 1
+                if km_date > pilot["last_loss"]:
+                    pilot["last_loss"] = km_date
+                losses_counted += 1
+
+        kills_counted = 0
+        for km in kill_killmails:
+            if not km:
+                continue
+            km_date = km.get("killmail_time", "")[:10]
+            if km_date < since:
+                continue
+            counted_this_km = False
+            for attacker in km.get("attackers", []):
+                if attacker.get("corporation_id") == corp_id and attacker.get("character_id"):
+                    pilot = get_pilot(attacker["character_id"])
+                    pilot["kills"] += 1
+                    counted_this_km = True
+            if counted_this_km:
+                kills_counted += 1
+
+        # Step 4: turn IDs into names
+        char_ids = list(pilots.keys())
+        all_ship_ids = []
+        for pilot in pilots.values():
+            all_ship_ids.extend(pilot["ship_ids"].keys())
+
+        char_names, ship_names = await asyncio.gather(
+            resolve_names(client, char_ids),
+            resolve_names(client, all_ship_ids),
+        )
+
+        pilot_list = []
+        for char_id, pilot in pilots.items():
+            ships_lost = [
+                {"name": ship_names.get(ship_id, f"Ship {ship_id}"), "count": count}
+                for ship_id, count in pilot["ship_ids"].most_common()
+            ]
+            pilot_list.append({
+                "name": char_names.get(char_id, f"Unknown ({char_id})"),
+                "character_id": char_id,
+                "zkillboard_url": f"https://zkillboard.com/character/{char_id}/",
+                "losses": pilot["losses"],
+                "kills": pilot["kills"],
+                "ships_lost": ships_lost,
+                "last_loss": pilot["last_loss"] or None,
+            })
+
+        pilot_list.sort(key=lambda p: (p["losses"], p["kills"]), reverse=True)
+
+        result = {
+            "corporation_name": corp_name,
+            "corporation_id": corp_id,
+            "since": since,
+            "losses_counted": losses_counted,
+            "kills_counted": kills_counted,
+            "losses_capped": len(losses_refs) >= 200,
+            "kills_capped": len(kills_refs) >= 200,
+            "pilots": pilot_list,
             "from_cache": False,
         }
 
