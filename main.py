@@ -503,12 +503,25 @@ async def corp_activity(name: str, since: str):
         return result
 
 # ---------------------------------------------------------------
-# Bulk check: paste a list of names, see who is in a given corp
+# Bulk check: paste a list of names, see who is in a corp / alliance
 # ---------------------------------------------------------------
 
 class BulkRequest(BaseModel):
     names: list[str]
     corp: str = ""
+    alliance: str = ""
+
+async def lookup_group(client, query, key):
+    """Find a corp or alliance by name. key is 'corporations' or 'alliances'."""
+    resp = await client.post(
+        "https://esi.evetech.net/latest/universe/ids/",
+        json=[query]
+    )
+    data = resp.json()
+    items = data.get(key) or []
+    if not items:
+        return None, None
+    return items[0]["id"], items[0]["name"]
 
 @app.post("/api/bulk-check")
 async def bulk_check(req: BulkRequest):
@@ -530,24 +543,29 @@ async def bulk_check(req: BulkRequest):
         truncated = True
 
     async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=60.0) as client:
-        # Step 1: find the corp we are checking against (optional)
+        # Step 1: find the corp and/or alliance we are checking against (both optional)
         target_corp_id = None
         target_corp_name = None
+        target_alliance_id = None
+        target_alliance_name = None
+
         corp_query = req.corp.strip()
         if corp_query:
             try:
-                corp_resp = await client.post(
-                    "https://esi.evetech.net/latest/universe/ids/",
-                    json=[corp_query]
-                )
-                corp_data = corp_resp.json()
+                target_corp_id, target_corp_name = await lookup_group(client, corp_query, "corporations")
             except Exception as e:
                 return {"error": f"Could not look up the corporation: {str(e)}"}
-            corps = corp_data.get("corporations") or []
-            if not corps:
+            if not target_corp_id:
                 return {"error": f"No corporation found with name '{corp_query}'"}
-            target_corp_id = corps[0]["id"]
-            target_corp_name = corps[0]["name"]
+
+        alliance_query = req.alliance.strip()
+        if alliance_query:
+            try:
+                target_alliance_id, target_alliance_name = await lookup_group(client, alliance_query, "alliances")
+            except Exception as e:
+                return {"error": f"Could not look up the alliance: {str(e)}"}
+            if not target_alliance_id:
+                return {"error": f"No alliance found with name '{alliance_query}'"}
 
         # Step 2: turn names into character IDs (500 names per request)
         found = {}  # character_id -> proper name
@@ -569,17 +587,20 @@ async def bulk_check(req: BulkRequest):
         found_lower = set(n.lower() for n in found.values())
         not_found = [n for n in names if n.lower() not in found_lower]
 
+        empty_result = {
+            "target_corp": target_corp_name,
+            "target_alliance": target_alliance_name,
+            "total_names": len(names),
+            "found_count": 0,
+            "matches": [],
+            "alliance_matches": [],
+            "others": [],
+            "not_found": not_found,
+            "truncated": truncated,
+        }
+
         if not found:
-            return {
-                "target_corp": target_corp_name,
-                "total_names": len(names),
-                "found_count": 0,
-                "match_count": 0,
-                "matches": [],
-                "others": [],
-                "not_found": not_found,
-                "truncated": truncated,
-            }
+            return empty_result
 
         # Step 3: look up the current corp and alliance of every character
         char_ids = list(found.keys())
@@ -602,8 +623,10 @@ async def bulk_check(req: BulkRequest):
         alliance_ids = [a.get("alliance_id") for a in affiliations]
         id_to_name = await resolve_names(client, corp_ids + alliance_ids)
 
-        matches = []
-        others = []
+        matches = []           # in the target corp
+        alliance_matches = []  # in the target alliance, but not in the target corp
+        others = []            # in neither
+
         for a in affiliations:
             char_id = a.get("character_id")
             corp_id = a.get("corporation_id")
@@ -617,18 +640,22 @@ async def bulk_check(req: BulkRequest):
             }
             if target_corp_id and corp_id == target_corp_id:
                 matches.append(row)
+            elif target_alliance_id and alliance_id == target_alliance_id:
+                alliance_matches.append(row)
             else:
                 others.append(row)
 
         matches.sort(key=lambda r: r["name"].lower())
+        alliance_matches.sort(key=lambda r: (r["corporation_name"].lower(), r["name"].lower()))
         others.sort(key=lambda r: (r["corporation_name"].lower(), r["name"].lower()))
 
         return {
             "target_corp": target_corp_name,
+            "target_alliance": target_alliance_name,
             "total_names": len(names),
             "found_count": len(found),
-            "match_count": len(matches),
             "matches": matches,
+            "alliance_matches": alliance_matches,
             "others": others,
             "not_found": not_found,
             "truncated": truncated,
