@@ -300,10 +300,13 @@
     <textarea id="bulkNames" placeholder="Paste character names here, one per line (up to 1000)..."></textarea>
     <div class="bulk-row">
       <input type="text" id="bulkCorp" placeholder="Corporation to check for (optional)...">
+      <input type="text" id="bulkAlliance" placeholder="Alliance to check for (optional)...">
+    </div>
+    <div class="bulk-row">
       <button class="action" onclick="runBulkCheck()">Check Names</button>
     </div>
   </div>
-  <div class="hint">Finds each pilot's current corp and alliance. Enter a corporation to see who is in it and who isn't. Leave it blank to just list everyone's corp.</div>
+  <div class="hint">Finds each pilot's current corp and alliance. Fill in a corporation, an alliance, or both. With both, you get three groups: in the corp, in the alliance (other corps), and in neither. Leave both blank to just list everyone's corp.</div>
   <div class="loading-text" id="bulkLoading">Checking names...</div>
   <div class="result-area" id="bulkResult"></div>
 </div>
@@ -569,6 +572,7 @@ function buildBulkRows(list) {
 async function runBulkCheck() {
   var raw = document.getElementById('bulkNames').value;
   var corp = document.getElementById('bulkCorp').value.trim();
+  var alliance = document.getElementById('bulkAlliance').value.trim();
   var names = raw.split(/\r?\n/);
 
   var cleaned = [];
@@ -590,7 +594,7 @@ async function runBulkCheck() {
     var response = await fetch('/api/bulk-check', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ names: cleaned, corp: corp })
+      body: JSON.stringify({ names: cleaned, corp: corp, alliance: alliance })
     });
     var data = await response.json();
 
@@ -607,12 +611,23 @@ async function runBulkCheck() {
       truncNote = '<div class="flag-banner flag-neutral">Only the first 1000 unique names were checked.</div>';
     }
 
+    var corpCount = data.matches.length;
+    var allianceCount = data.alliance_matches.length;
+    var otherCount = data.others.length;
+
     var summaryHtml = '<div class="card">' + truncNote +
       '<div class="char-name">Bulk Check Results</div>' +
       '<div class="summary-line">' + data.total_names + ' unique names \u00B7 ' + data.found_count + ' found \u00B7 ' + data.not_found.length + ' not found</div>';
+
     if (data.target_corp) {
-      summaryHtml += '<div class="summary-line"><span class="kill-num">' + data.match_count + ' in ' + esc(data.target_corp) + '</span> \u00B7 ' +
-        '<span class="loss-num">' + (data.found_count - data.match_count) + ' not in ' + esc(data.target_corp) + '</span></div>';
+      summaryHtml += '<div class="summary-line"><span class="kill-num">' + corpCount + ' in corp ' + esc(data.target_corp) + '</span></div>';
+    }
+    if (data.target_alliance) {
+      var allianceWord = data.target_corp ? ' in alliance ' + esc(data.target_alliance) + ' (other corps)' : ' in alliance ' + esc(data.target_alliance);
+      summaryHtml += '<div class="summary-line"><span class="kill-num">' + allianceCount + allianceWord + '</span></div>';
+    }
+    if (data.target_corp || data.target_alliance) {
+      summaryHtml += '<div class="summary-line"><span class="loss-num">' + otherCount + ' in neither</span></div>';
     }
     summaryHtml += '</div>';
 
@@ -620,13 +635,24 @@ async function runBulkCheck() {
 
     if (data.target_corp) {
       html += '<details class="card" open>' +
-        '<summary class="card-title">In ' + esc(data.target_corp) + ' (' + data.match_count + ')</summary>' +
+        '<summary class="card-title">In corp ' + esc(data.target_corp) + ' (' + corpCount + ')</summary>' +
         '<div class="card-body">' + buildBulkRows(data.matches) + '</div>' +
       '</details>';
     }
 
-    html += '<details class="card"' + (data.target_corp ? '' : ' open') + '>' +
-      '<summary class="card-title">' + (data.target_corp ? 'Not in that corp' : 'All pilots, grouped by corp') + ' (' + data.others.length + ')</summary>' +
+    if (data.target_alliance) {
+      var allianceTitle = data.target_corp
+        ? 'In alliance ' + esc(data.target_alliance) + ', other corps (' + allianceCount + ')'
+        : 'In alliance ' + esc(data.target_alliance) + ' (' + allianceCount + ')';
+      html += '<details class="card" open>' +
+        '<summary class="card-title">' + allianceTitle + '</summary>' +
+        '<div class="card-body">' + buildBulkRows(data.alliance_matches) + '</div>' +
+      '</details>';
+    }
+
+    var hasTarget = data.target_corp || data.target_alliance;
+    html += '<details class="card"' + (hasTarget ? '' : ' open') + '>' +
+      '<summary class="card-title">' + (hasTarget ? 'In neither' : 'All pilots, grouped by corp') + ' (' + otherCount + ')</summary>' +
       '<div class="card-body">' + buildBulkRows(data.others) + '</div>' +
     '</details>';
 
