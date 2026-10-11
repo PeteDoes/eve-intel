@@ -34,6 +34,8 @@
     display: flex;
     gap: 8px;
     margin-top: 20px;
+    flex-wrap: wrap;
+    justify-content: center;
   }
   .mode-tab {
     padding: 10px 18px;
@@ -73,6 +75,19 @@
   input[type="date"] {
     flex: 0 0 auto;
     color-scheme: dark;
+  }
+  textarea {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 180px;
+    padding: 12px 14px;
+    border-radius: 8px;
+    border: 1px solid #333;
+    background-color: #1a1a1d;
+    color: #fff;
+    font-size: 14px;
+    font-family: inherit;
+    resize: vertical;
   }
   button.action {
     padding: 12px 20px;
@@ -223,6 +238,25 @@
     max-width: 600px;
     margin-top: 8px;
   }
+  .bulk-box {
+    width: 90%;
+    max-width: 600px;
+    margin-top: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .bulk-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .not-found-list {
+    font-size: 13px;
+    color: #aaa;
+    line-height: 1.7;
+    word-break: break-word;
+  }
 </style>
 </head>
 <body>
@@ -235,6 +269,7 @@
 <div class="mode-tabs">
   <button class="mode-tab active" id="tabChar" onclick="showMode('char')">Character Lookup</button>
   <button class="mode-tab" id="tabCorp" onclick="showMode('corp')">Corp Activity Report</button>
+  <button class="mode-tab" id="tabBulk" onclick="showMode('bulk')">Bulk Check</button>
 </div>
 
 <!-- CHARACTER LOOKUP -->
@@ -254,9 +289,23 @@
     <input type="date" id="sinceInput">
     <button class="action" onclick="runCorpReport()">Run Report</button>
   </div>
-  <div class="hint">Lists every pilot in the corp who lost ships or got kills since the start date. Scans the 200 most recent losses and 200 most recent kills.</div>
+  <div class="hint">Lists every pilot in the corp who lost ships or got kills since the start date. Scans up to 600 of the corp's most recent losses and 600 of its most recent kills.</div>
   <div class="loading-text" id="corpLoading">Scanning killmails... this can take 30 to 60 seconds for busy corps.</div>
   <div class="result-area" id="corpResult"></div>
+</div>
+
+<!-- BULK CHECK -->
+<div id="bulkSection" style="display:none; flex-direction:column; align-items:center; width:100%;">
+  <div class="bulk-box">
+    <textarea id="bulkNames" placeholder="Paste character names here, one per line (up to 1000)..."></textarea>
+    <div class="bulk-row">
+      <input type="text" id="bulkCorp" placeholder="Corporation to check for (optional)...">
+      <button class="action" onclick="runBulkCheck()">Check Names</button>
+    </div>
+  </div>
+  <div class="hint">Finds each pilot's current corp and alliance. Enter a corporation to see who is in it and who isn't. Leave it blank to just list everyone's corp.</div>
+  <div class="loading-text" id="bulkLoading">Checking names...</div>
+  <div class="result-area" id="bulkResult"></div>
 </div>
 
 <script>
@@ -270,20 +319,18 @@ function esc(text) {
 }
 
 function showMode(mode) {
-  var charSection = document.getElementById('charSection');
-  var corpSection = document.getElementById('corpSection');
-  var tabChar = document.getElementById('tabChar');
-  var tabCorp = document.getElementById('tabCorp');
-  if (mode === 'corp') {
-    charSection.style.display = 'none';
-    corpSection.style.display = 'flex';
-    tabChar.classList.remove('active');
-    tabCorp.classList.add('active');
-  } else {
-    corpSection.style.display = 'none';
-    charSection.style.display = 'flex';
-    tabCorp.classList.remove('active');
-    tabChar.classList.add('active');
+  var modes = ['char', 'corp', 'bulk'];
+  for (var i = 0; i < modes.length; i++) {
+    var m = modes[i];
+    var section = document.getElementById(m + 'Section');
+    var tab = document.getElementById('tab' + m.charAt(0).toUpperCase() + m.slice(1));
+    if (m === mode) {
+      section.style.display = 'flex';
+      tab.classList.add('active');
+    } else {
+      section.style.display = 'none';
+      tab.classList.remove('active');
+    }
   }
 }
 
@@ -477,7 +524,7 @@ async function runCorpReport() {
 
     var capNote = '';
     if (data.losses_capped || data.kills_capped) {
-      capNote = '<div class="flag-banner flag-neutral">This corp is very active. Only the 200 most recent losses and/or kills were scanned, so activity near the start date may be missing. Try a later start date for a complete picture.</div>';
+      capNote = '<div class="flag-banner flag-neutral">This corp is very active. Only the 600 most recent losses and/or kills were scanned, so activity near the start date may be missing. Try a later start date for a complete picture.</div>';
     }
 
     var summary = '<div class="card">' +
@@ -496,6 +543,107 @@ async function runCorpReport() {
     loadingDiv.style.display = 'none';
     resultDiv.style.display = 'block';
     resultDiv.innerHTML = '<div class="card"><div class="row"><span class="value">Something went wrong. The corp may be too busy, so try a later start date.</span></div></div>';
+  }
+}
+
+/* ---------- Bulk check ---------- */
+
+function buildBulkRows(list) {
+  if (!list || list.length === 0) {
+    return '<div class="row"><span class="value">None</span></div>';
+  }
+  var rows = '';
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i];
+    var sub = esc(p.corporation_name);
+    if (p.alliance_name) sub += ' \u00B7 ' + esc(p.alliance_name);
+    rows += '<div class="row">' +
+      '<span class="label"><a class="fleetmate-link" href="' + esc(p.zkillboard_url) + '" target="_blank">' +
+        '<span class="fleetmate-name">' + esc(p.name) + '</span></a>' +
+        '<span class="sublabel">' + sub + '</span></span>' +
+      '</div>';
+  }
+  return rows;
+}
+
+async function runBulkCheck() {
+  var raw = document.getElementById('bulkNames').value;
+  var corp = document.getElementById('bulkCorp').value.trim();
+  var names = raw.split(/\r?\n/);
+
+  var cleaned = [];
+  for (var i = 0; i < names.length; i++) {
+    var n = names[i].trim();
+    if (n) cleaned.push(n);
+  }
+  if (cleaned.length === 0) {
+    alert('Please paste at least one character name.');
+    return;
+  }
+
+  var resultDiv = document.getElementById('bulkResult');
+  var loadingDiv = document.getElementById('bulkLoading');
+  resultDiv.style.display = 'none';
+  loadingDiv.style.display = 'block';
+
+  try {
+    var response = await fetch('/api/bulk-check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names: cleaned, corp: corp })
+    });
+    var data = await response.json();
+
+    loadingDiv.style.display = 'none';
+    resultDiv.style.display = 'block';
+
+    if (data.error) {
+      resultDiv.innerHTML = '<div class="card"><div class="row"><span class="value">' + esc(data.error) + '</span></div></div>';
+      return;
+    }
+
+    var truncNote = '';
+    if (data.truncated) {
+      truncNote = '<div class="flag-banner flag-neutral">Only the first 1000 unique names were checked.</div>';
+    }
+
+    var summaryHtml = '<div class="card">' + truncNote +
+      '<div class="char-name">Bulk Check Results</div>' +
+      '<div class="summary-line">' + data.total_names + ' unique names \u00B7 ' + data.found_count + ' found \u00B7 ' + data.not_found.length + ' not found</div>';
+    if (data.target_corp) {
+      summaryHtml += '<div class="summary-line"><span class="kill-num">' + data.match_count + ' in ' + esc(data.target_corp) + '</span> \u00B7 ' +
+        '<span class="loss-num">' + (data.found_count - data.match_count) + ' not in ' + esc(data.target_corp) + '</span></div>';
+    }
+    summaryHtml += '</div>';
+
+    var html = summaryHtml;
+
+    if (data.target_corp) {
+      html += '<details class="card" open>' +
+        '<summary class="card-title">In ' + esc(data.target_corp) + ' (' + data.match_count + ')</summary>' +
+        '<div class="card-body">' + buildBulkRows(data.matches) + '</div>' +
+      '</details>';
+    }
+
+    html += '<details class="card"' + (data.target_corp ? '' : ' open') + '>' +
+      '<summary class="card-title">' + (data.target_corp ? 'Not in that corp' : 'All pilots, grouped by corp') + ' (' + data.others.length + ')</summary>' +
+      '<div class="card-body">' + buildBulkRows(data.others) + '</div>' +
+    '</details>';
+
+    if (data.not_found.length > 0) {
+      var nf = [];
+      for (var j = 0; j < data.not_found.length; j++) nf.push(esc(data.not_found[j]));
+      html += '<details class="card">' +
+        '<summary class="card-title">Names not found (' + data.not_found.length + ')</summary>' +
+        '<div class="card-body"><div class="not-found-list">' + nf.join(', ') + '</div></div>' +
+      '</details>';
+    }
+
+    resultDiv.innerHTML = html;
+  } catch (err) {
+    loadingDiv.style.display = 'none';
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = '<div class="card"><div class="row"><span class="value">Something went wrong. Please try again.</span></div></div>';
   }
 }
 </script>
