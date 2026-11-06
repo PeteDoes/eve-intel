@@ -62,7 +62,7 @@
     margin-top: 24px;
     flex-wrap: wrap;
   }
-  input {
+  input[type="text"], input[type="date"] {
     flex: 1;
     min-width: 160px;
     padding: 12px 14px;
@@ -250,12 +250,87 @@
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+    align-items: center;
+  }
+  .check-label {
+    font-size: 14px;
+    color: #ccc;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
   }
   .not-found-list {
     font-size: 13px;
     color: #aaa;
     line-height: 1.7;
     word-break: break-word;
+  }
+
+  /* Expandable pilot rows in Bulk Check */
+  details.pilot {
+    border-bottom: 1px solid #2a2a2e;
+  }
+  details.pilot:last-child {
+    border-bottom: none;
+  }
+  summary.pilot-summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 0;
+    cursor: pointer;
+    list-style: none;
+    font-size: 14px;
+  }
+  summary.pilot-summary::-webkit-details-marker {
+    display: none;
+  }
+  summary.pilot-summary:hover .fleetmate-name {
+    text-decoration: underline;
+  }
+  .pilot-main::before {
+    content: "\25B8  ";
+    color: #666;
+  }
+  details.pilot[open] .pilot-main::before {
+    content: "\25BE  ";
+  }
+  .pilot-main {
+    color: #ddd;
+  }
+  .pilot-main .sublabel {
+    margin-left: 16px;
+  }
+  .pilot-badge {
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  .badge-danger {
+    background-color: #3d1a1a;
+    color: #ff8080;
+    border: 1px solid #5c2626;
+  }
+  .badge-warn {
+    background-color: #2a2a1a;
+    color: #d9c98f;
+    border: 1px solid #4d4526;
+  }
+  .badge-calm {
+    background-color: #222226;
+    color: #999;
+    border: 1px solid #333;
+  }
+  .pilot-body {
+    padding: 4px 0 14px 16px;
+  }
+  .pilot-body .zkill-link {
+    display: inline-block;
+    margin-bottom: 10px;
   }
 </style>
 </head>
@@ -302,12 +377,16 @@
       <input type="text" id="bulkCorp" placeholder="Corporation to check for (optional)...">
       <input type="text" id="bulkAlliance" placeholder="Alliance to check for (optional)...">
     </div>
+    <label class="check-label">
+      <input type="checkbox" id="bulkHistory" checked>
+      Include employment history and corp-hopping check (slower for big lists)
+    </label>
     <div class="bulk-row">
       <button class="action" onclick="runBulkCheck()">Check Names</button>
     </div>
   </div>
-  <div class="hint">Finds each pilot's current corp and alliance. Fill in a corporation, an alliance, or both. With both, you get three groups: in the corp, in the alliance (other corps), and in neither. Leave both blank to just list everyone's corp.</div>
-  <div class="loading-text" id="bulkLoading">Checking names...</div>
+  <div class="hint">Finds each pilot's current corp and alliance. Click any name to open their employment history. Pilots with a corp-hopping pattern are sorted to the top of each group. A flag is a hint to look closer, not proof of anything.</div>
+  <div class="loading-text" id="bulkLoading">Checking names... large lists with history can take 15 to 40 seconds.</div>
   <div class="result-area" id="bulkResult"></div>
 </div>
 
@@ -368,8 +447,8 @@ function buildEmploymentRows(history) {
     var entry = history[i];
     var durationText = (entry.duration_days !== null && entry.duration_days !== undefined) ? (entry.duration_days + ' days') : 'Unknown';
     var startDate = entry.start_date ? entry.start_date.split('T')[0] : '';
-    rows += '<div class="row"><span class="label">' + entry.corporation_name + (entry.is_deleted ? ' (defunct)' : '') +
-      '<span class="sublabel">' + startDate + ' \u2192 ' + entry.end_date + '</span></span>' +
+    rows += '<div class="row"><span class="label">' + esc(entry.corporation_name) + (entry.is_deleted ? ' (defunct)' : '') +
+      '<span class="sublabel">' + esc(startDate) + ' \u2192 ' + esc(entry.end_date) + '</span></span>' +
       '<span class="value">' + durationText + '</span></div>';
   }
   return rows;
@@ -383,7 +462,7 @@ function buildCorpHopBanner(analysis) {
   } else if (analysis.short_stint_count > 0) {
     flagClass = 'flag-neutral';
   }
-  return '<div class="flag-banner ' + flagClass + '">' + analysis.reason + '</div>';
+  return '<div class="flag-banner ' + flagClass + '">' + esc(analysis.reason) + '</div>';
 }
 
 async function searchCharacter() {
@@ -551,7 +630,18 @@ async function runCorpReport() {
 
 /* ---------- Bulk check ---------- */
 
-function buildBulkRows(list) {
+function buildPilotBadge(p) {
+  if (!p.corp_hop) return '';
+  if (p.corp_hop.is_flagged) {
+    return '<span class="pilot-badge badge-danger">Flagged \u00B7 ' + p.corp_hop.short_stint_count + ' short</span>';
+  }
+  if (p.corp_hop.short_stint_count > 0) {
+    return '<span class="pilot-badge badge-warn">' + p.corp_hop.short_stint_count + ' short</span>';
+  }
+  return '<span class="pilot-badge badge-calm">' + p.corp_hop.total_corps + ' corps</span>';
+}
+
+function buildBulkRows(list, historyIncluded) {
   if (!list || list.length === 0) {
     return '<div class="row"><span class="value">None</span></div>';
   }
@@ -560,11 +650,22 @@ function buildBulkRows(list) {
     var p = list[i];
     var sub = esc(p.corporation_name);
     if (p.alliance_name) sub += ' \u00B7 ' + esc(p.alliance_name);
-    rows += '<div class="row">' +
-      '<span class="label"><a class="fleetmate-link" href="' + esc(p.zkillboard_url) + '" target="_blank">' +
-        '<span class="fleetmate-name">' + esc(p.name) + '</span></a>' +
-        '<span class="sublabel">' + sub + '</span></span>' +
-      '</div>';
+
+    var body = '<a class="zkill-link" href="' + esc(p.zkillboard_url) + '" target="_blank">View on zKillboard \u2192</a>';
+    if (p.employment_history && p.employment_history.length > 0) {
+      body += buildCorpHopBanner(p.corp_hop) + buildEmploymentRows(p.employment_history);
+    } else if (historyIncluded) {
+      body += '<div class="row"><span class="value">Employment history unavailable</span></div>';
+    }
+
+    rows += '<details class="pilot">' +
+      '<summary class="pilot-summary">' +
+        '<span class="pilot-main"><span class="fleetmate-name">' + esc(p.name) + '</span>' +
+          '<span class="sublabel">' + sub + '</span></span>' +
+        buildPilotBadge(p) +
+      '</summary>' +
+      '<div class="pilot-body">' + body + '</div>' +
+    '</details>';
   }
   return rows;
 }
@@ -573,6 +674,7 @@ async function runBulkCheck() {
   var raw = document.getElementById('bulkNames').value;
   var corp = document.getElementById('bulkCorp').value.trim();
   var alliance = document.getElementById('bulkAlliance').value.trim();
+  var includeHistory = document.getElementById('bulkHistory').checked;
   var names = raw.split(/\r?\n/);
 
   var cleaned = [];
@@ -594,7 +696,7 @@ async function runBulkCheck() {
     var response = await fetch('/api/bulk-check', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ names: cleaned, corp: corp, alliance: alliance })
+      body: JSON.stringify({ names: cleaned, corp: corp, alliance: alliance, include_history: includeHistory })
     });
     var data = await response.json();
 
@@ -619,6 +721,9 @@ async function runBulkCheck() {
       '<div class="char-name">Bulk Check Results</div>' +
       '<div class="summary-line">' + data.total_names + ' unique names \u00B7 ' + data.found_count + ' found \u00B7 ' + data.not_found.length + ' not found</div>';
 
+    if (data.history_included) {
+      summaryHtml += '<div class="summary-line"><span class="loss-num">' + data.flagged_count + ' flagged for corp-hopping</span></div>';
+    }
     if (data.target_corp) {
       summaryHtml += '<div class="summary-line"><span class="kill-num">' + corpCount + ' in corp ' + esc(data.target_corp) + '</span></div>';
     }
@@ -636,7 +741,7 @@ async function runBulkCheck() {
     if (data.target_corp) {
       html += '<details class="card" open>' +
         '<summary class="card-title">In corp ' + esc(data.target_corp) + ' (' + corpCount + ')</summary>' +
-        '<div class="card-body">' + buildBulkRows(data.matches) + '</div>' +
+        '<div class="card-body">' + buildBulkRows(data.matches, data.history_included) + '</div>' +
       '</details>';
     }
 
@@ -646,14 +751,14 @@ async function runBulkCheck() {
         : 'In alliance ' + esc(data.target_alliance) + ' (' + allianceCount + ')';
       html += '<details class="card" open>' +
         '<summary class="card-title">' + allianceTitle + '</summary>' +
-        '<div class="card-body">' + buildBulkRows(data.alliance_matches) + '</div>' +
+        '<div class="card-body">' + buildBulkRows(data.alliance_matches, data.history_included) + '</div>' +
       '</details>';
     }
 
     var hasTarget = data.target_corp || data.target_alliance;
     html += '<details class="card"' + (hasTarget ? '' : ' open') + '>' +
       '<summary class="card-title">' + (hasTarget ? 'In neither' : 'All pilots, grouped by corp') + ' (' + otherCount + ')</summary>' +
-      '<div class="card-body">' + buildBulkRows(data.others) + '</div>' +
+      '<div class="card-body">' + buildBulkRows(data.others, data.history_included) + '</div>' +
     '</details>';
 
     if (data.not_found.length > 0) {
