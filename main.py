@@ -503,13 +503,15 @@ async def corp_activity(name: str, since: str):
         return result
 
 # ---------------------------------------------------------------
-# Bulk check: paste a list of names, see who is in a corp / alliance
+# Bulk check: paste a list of names, see who is in a corp / alliance,
+# with each pilot's employment history for spy hunting
 # ---------------------------------------------------------------
 
 class BulkRequest(BaseModel):
     names: list[str]
     corp: str = ""
     alliance: str = ""
+    include_history: bool = True
 
 async def lookup_group(client, query, key):
     """Find a corp or alliance by name. key is 'corporations' or 'alliances'."""
@@ -522,6 +524,22 @@ async def lookup_group(client, query, key):
     if not items:
         return None, None
     return items[0]["id"], items[0]["name"]
+
+async def fetch_history_raw(client, semaphore, char_id):
+    """Fetch one character's raw corporation history (a few at a time)."""
+    async with semaphore:
+        try:
+            resp = await client.get(
+                f"https://esi.evetech.net/latest/characters/{char_id}/corporationhistory/"
+            )
+            if resp.status_code != 200:
+                return char_id, None
+            data = resp.json()
+            if isinstance(data, list):
+                return char_id, data
+        except Exception:
+            pass
+    return char_id, None
 
 @app.post("/api/bulk-check")
 async def bulk_check(req: BulkRequest):
@@ -592,6 +610,8 @@ async def bulk_check(req: BulkRequest):
             "target_alliance": target_alliance_name,
             "total_names": len(names),
             "found_count": 0,
+            "flagged_count": 0,
+            "history_included": req.include_history,
             "matches": [],
             "alliance_matches": [],
             "others": [],
@@ -618,25 +638,59 @@ async def bulk_check(req: BulkRequest):
                 return {"error": f"EVE's servers could not return corporations: {resp.text[:200]}"}
             affiliations.extend(resp.json())
 
-        # Step 4: turn corp and alliance IDs into names
-        corp_ids = [a.get("corporation_id") for a in affiliations]
-        alliance_ids = [a.get("alliance_id") for a in affiliations]
-        id_to_name = await resolve_names(client, corp_ids + alliance_ids)
+        # Step 4 (optional): fetch every pilot's employment history, 25 at a time
+        raw_histories = {}
+        if req.include_history:
+            semaphore = asyncio.Semaphore(25)
+            results = await asyncio.gather(*[
+                fetch_history_raw(client, semaphore, cid) for cid in char_ids
+            ])
+            for cid, hist in results:
+                raw_histories[cid] = hist
+
+        # Step 5: turn all corp and alliance IDs into names in one go
+        ids_to_resolve = [a.get("corporation_id") for a in affiliations]
+        ids_to_resolve += [a.get("alliance_id") for a in affiliations]
+        for hist in raw_histories.values():
+            if hist:
+                ids_to_resolve += [e.get("corporation_id") for e in hist]
+        id_to_name = await resolve_names(client, ids_to_resolve)
 
         matches = []           # in the target corp
         alliance_matches = []  # in the target alliance, but not in the target corp
         others = []            # in neither
+        flagged_count = 0
 
         for a in affiliations:
             char_id = a.get("character_id")
             corp_id = a.get("corporation_id")
             alliance_id = a.get("alliance_id")
+
+            employment_history = None
+            corp_hop = None
+            hist = raw_histories.get(char_id)
+            if hist:
+                readable = []
+                for e in hist:
+                    cid = e.get("corporation_id")
+                    readable.append({
+                        "corporation_name": id_to_name.get(cid, f"Unknown ({cid})"),
+                        "start_date": e.get("start_date"),
+                        "is_deleted": e.get("is_deleted", False),
+                    })
+                readable.sort(key=lambda e: e.get("start_date") or "", reverse=True)
+                employment_history, corp_hop = analyze_corp_hopping(readable)
+                if corp_hop.get("is_flagged"):
+                    flagged_count += 1
+
             row = {
                 "name": found.get(char_id, f"Unknown ({char_id})"),
                 "character_id": char_id,
                 "zkillboard_url": f"https://zkillboard.com/character/{char_id}/",
                 "corporation_name": id_to_name.get(corp_id, f"Unknown ({corp_id})"),
                 "alliance_name": id_to_name.get(alliance_id) if alliance_id else None,
+                "employment_history": employment_history,
+                "corp_hop": corp_hop,
             }
             if target_corp_id and corp_id == target_corp_id:
                 matches.append(row)
@@ -645,15 +699,22 @@ async def bulk_check(req: BulkRequest):
             else:
                 others.append(row)
 
-        matches.sort(key=lambda r: r["name"].lower())
-        alliance_matches.sort(key=lambda r: (r["corporation_name"].lower(), r["name"].lower()))
-        others.sort(key=lambda r: (r["corporation_name"].lower(), r["name"].lower()))
+        def sort_key(r):
+            flagged = bool(r["corp_hop"] and r["corp_hop"].get("is_flagged"))
+            short = r["corp_hop"].get("short_stint_count", 0) if r["corp_hop"] else 0
+            return (not flagged, -short, r["corporation_name"].lower(), r["name"].lower())
+
+        matches.sort(key=sort_key)
+        alliance_matches.sort(key=sort_key)
+        others.sort(key=sort_key)
 
         return {
             "target_corp": target_corp_name,
             "target_alliance": target_alliance_name,
             "total_names": len(names),
             "found_count": len(found),
+            "flagged_count": flagged_count,
+            "history_included": req.include_history,
             "matches": matches,
             "alliance_matches": alliance_matches,
             "others": others,
