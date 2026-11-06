@@ -449,3 +449,310 @@ async def corp_activity(name: str, since: str):
             counted_this_km = False
             for attacker in km.get("attackers", []):
                 if attacker.get("corporation_id") == corp_id and attacker.get("character_id"):
+                    pilot = get_pilot(attacker["character_id"])
+                    pilot["kills"] += 1
+                    counted_this_km = True
+            if counted_this_km:
+                kills_counted += 1
+
+        # Step 3: turn IDs into names
+        char_ids = list(pilots.keys())
+        all_ship_ids = []
+        for pilot in pilots.values():
+            all_ship_ids.extend(pilot["ship_ids"].keys())
+
+        char_names, ship_names = await asyncio.gather(
+            resolve_names(client, char_ids),
+            resolve_names(client, all_ship_ids),
+        )
+
+        pilot_list = []
+        for char_id, pilot in pilots.items():
+            ships_lost = [
+                {"name": ship_names.get(ship_id, f"Ship {ship_id}"), "count": count}
+                for ship_id, count in pilot["ship_ids"].most_common()
+            ]
+            pilot_list.append({
+                "name": char_names.get(char_id, f"Unknown ({char_id})"),
+                "character_id": char_id,
+                "zkillboard_url": f"https://zkillboard.com/character/{char_id}/",
+                "losses": pilot["losses"],
+                "kills": pilot["kills"],
+                "ships_lost": ships_lost,
+                "last_loss": pilot["last_loss"] or None,
+            })
+
+        pilot_list.sort(key=lambda p: (p["losses"], p["kills"]), reverse=True)
+
+        result = {
+            "corporation_name": corp_name,
+            "corporation_id": corp_id,
+            "since": since,
+            "losses_counted": losses_counted,
+            "kills_counted": kills_counted,
+            "losses_capped": losses_capped,
+            "kills_capped": kills_capped,
+            "pilots": pilot_list,
+            "from_cache": False,
+        }
+
+        # Only cache clean results, so a temporary error isn't remembered
+        if not loss_error and not kill_error:
+            await redis_client.set(cache_key, json.dumps(result), ex=600)
+
+        return result
+
+# ---------------------------------------------------------------
+# Bulk check: paste a list of names, see who is in (or was ever in)
+# a corp, who is in an alliance, with employment history for spy hunting
+# ---------------------------------------------------------------
+
+class BulkRequest(BaseModel):
+    names: list[str]
+    corp: str = ""
+    alliance: str = ""
+    include_history: bool = True
+
+async def lookup_group(client, query, key):
+    """Find a corp or alliance by name. key is 'corporations' or 'alliances'."""
+    resp = await client.post(
+        "https://esi.evetech.net/latest/universe/ids/",
+        json=[query]
+    )
+    data = resp.json()
+    items = data.get(key) or []
+    if not items:
+        return None, None
+    return items[0]["id"], items[0]["name"]
+
+async def fetch_history_raw(client, semaphore, char_id):
+    """Fetch one character's raw corporation history (a few at a time)."""
+    async with semaphore:
+        try:
+            resp = await client.get(
+                f"https://esi.evetech.net/latest/characters/{char_id}/corporationhistory/"
+            )
+            if resp.status_code != 200:
+                return char_id, None
+            data = resp.json()
+            if isinstance(data, list):
+                return char_id, data
+        except Exception:
+            pass
+    return char_id, None
+
+@app.post("/api/bulk-check")
+async def bulk_check(req: BulkRequest):
+    # Clean the list: trim spaces, drop blanks, drop duplicates
+    seen = set()
+    names = []
+    for raw in req.names:
+        n = raw.strip()
+        if n and n.lower() not in seen:
+            seen.add(n.lower())
+            names.append(n)
+
+    if not names:
+        return {"error": "Please paste at least one character name."}
+
+    truncated = False
+    if len(names) > 1000:
+        names = names[:1000]
+        truncated = True
+
+    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=60.0) as client:
+        # Step 1: find the corp and/or alliance we are checking against (both optional)
+        target_corp_id = None
+        target_corp_name = None
+        target_alliance_id = None
+        target_alliance_name = None
+
+        corp_query = req.corp.strip()
+        if corp_query:
+            try:
+                target_corp_id, target_corp_name = await lookup_group(client, corp_query, "corporations")
+            except Exception as e:
+                return {"error": f"Could not look up the corporation: {str(e)}"}
+            if not target_corp_id:
+                return {"error": f"No corporation found with name '{corp_query}'"}
+
+        alliance_query = req.alliance.strip()
+        if alliance_query:
+            try:
+                target_alliance_id, target_alliance_name = await lookup_group(client, alliance_query, "alliances")
+            except Exception as e:
+                return {"error": f"Could not look up the alliance: {str(e)}"}
+            if not target_alliance_id:
+                return {"error": f"No alliance found with name '{alliance_query}'"}
+
+        # Employment history is needed to find past corp members, so it is
+        # always fetched when a corporation is entered.
+        fetch_history = req.include_history or bool(target_corp_id)
+
+        # Step 2: turn names into character IDs (500 names per request)
+        found = {}  # character_id -> proper name
+        for start in range(0, len(names), 500):
+            chunk = names[start:start + 500]
+            try:
+                resp = await client.post(
+                    "https://esi.evetech.net/latest/universe/ids/",
+                    json=chunk
+                )
+            except Exception as e:
+                return {"error": f"Could not reach EVE's servers: {str(e)}"}
+            if resp.status_code != 200:
+                return {"error": f"EVE's servers rejected the name list: {resp.text[:200]}"}
+            data = resp.json()
+            for c in data.get("characters", []):
+                found[c["id"]] = c["name"]
+
+        found_lower = set(n.lower() for n in found.values())
+        not_found = [n for n in names if n.lower() not in found_lower]
+
+        empty_result = {
+            "target_corp": target_corp_name,
+            "target_alliance": target_alliance_name,
+            "total_names": len(names),
+            "found_count": 0,
+            "flagged_count": 0,
+            "unknown_history_count": 0,
+            "history_included": fetch_history,
+            "matches": [],
+            "former_members": [],
+            "alliance_matches": [],
+            "others": [],
+            "not_found": not_found,
+            "truncated": truncated,
+        }
+
+        if not found:
+            return empty_result
+
+        # Step 3: look up the current corp and alliance of every character
+        char_ids = list(found.keys())
+        affiliations = []
+        for start in range(0, len(char_ids), 1000):
+            chunk = char_ids[start:start + 1000]
+            try:
+                resp = await client.post(
+                    "https://esi.evetech.net/latest/characters/affiliation/",
+                    json=chunk
+                )
+            except Exception as e:
+                return {"error": f"Could not look up corporations: {str(e)}"}
+            if resp.status_code != 200:
+                return {"error": f"EVE's servers could not return corporations: {resp.text[:200]}"}
+            affiliations.extend(resp.json())
+
+        # Step 4: fetch every pilot's employment history, 25 at a time
+        raw_histories = {}
+        if fetch_history:
+            semaphore = asyncio.Semaphore(25)
+            results = await asyncio.gather(*[
+                fetch_history_raw(client, semaphore, cid) for cid in char_ids
+            ])
+            for cid, hist in results:
+                raw_histories[cid] = hist
+
+        # Step 5: turn all corp and alliance IDs into names in one go
+        ids_to_resolve = [a.get("corporation_id") for a in affiliations]
+        ids_to_resolve += [a.get("alliance_id") for a in affiliations]
+        for hist in raw_histories.values():
+            if hist:
+                ids_to_resolve += [e.get("corporation_id") for e in hist]
+        id_to_name = await resolve_names(client, ids_to_resolve)
+
+        matches = []           # currently in the target corp
+        former_members = []    # left the target corp, but were in it before
+        alliance_matches = []  # in the target alliance, never in the target corp
+        others = []            # none of the above
+        flagged_count = 0
+        unknown_history_count = 0
+
+        for a in affiliations:
+            char_id = a.get("character_id")
+            corp_id = a.get("corporation_id")
+            alliance_id = a.get("alliance_id")
+            is_current_member = bool(target_corp_id and corp_id == target_corp_id)
+
+            employment_history = None
+            corp_hop = None
+            target_stints = []
+            hist = raw_histories.get(char_id)
+
+            if fetch_history and hist is None and target_corp_id and not is_current_member:
+                unknown_history_count += 1
+
+            if hist:
+                readable = []
+                for e in hist:
+                    cid = e.get("corporation_id")
+                    readable.append({
+                        "corporation_id": cid,
+                        "corporation_name": id_to_name.get(cid, f"Unknown ({cid})"),
+                        "start_date": e.get("start_date"),
+                        "is_deleted": e.get("is_deleted", False),
+                    })
+                readable.sort(key=lambda e: e.get("start_date") or "", reverse=True)
+                employment_history, corp_hop = analyze_corp_hopping(readable)
+                if corp_hop.get("is_flagged"):
+                    flagged_count += 1
+
+                # Find every stretch this pilot spent in the target corp
+                if target_corp_id:
+                    for idx, entry in enumerate(readable):
+                        if entry.get("corporation_id") == target_corp_id and idx < len(employment_history):
+                            stint = employment_history[idx]
+                            target_stints.append({
+                                "start_date": stint["start_date"],
+                                "end_date": stint["end_date"],
+                                "duration_days": stint["duration_days"],
+                            })
+
+            row = {
+                "name": found.get(char_id, f"Unknown ({char_id})"),
+                "character_id": char_id,
+                "zkillboard_url": f"https://zkillboard.com/character/{char_id}/",
+                "corporation_name": id_to_name.get(corp_id, f"Unknown ({corp_id})"),
+                "alliance_name": id_to_name.get(alliance_id) if alliance_id else None,
+                "employment_history": employment_history,
+                "corp_hop": corp_hop,
+                "target_corp_stints": target_stints,
+            }
+
+            if is_current_member:
+                matches.append(row)
+            elif target_corp_id and target_stints:
+                former_members.append(row)
+            elif target_alliance_id and alliance_id == target_alliance_id:
+                alliance_matches.append(row)
+            else:
+                others.append(row)
+
+        def sort_key(r):
+            flagged = bool(r["corp_hop"] and r["corp_hop"].get("is_flagged"))
+            short = r["corp_hop"].get("short_stint_count", 0) if r["corp_hop"] else 0
+            return (not flagged, -short, r["corporation_name"].lower(), r["name"].lower())
+
+        matches.sort(key=sort_key)
+        former_members.sort(key=sort_key)
+        alliance_matches.sort(key=sort_key)
+        others.sort(key=sort_key)
+
+        return {
+            "target_corp": target_corp_name,
+            "target_alliance": target_alliance_name,
+            "total_names": len(names),
+            "found_count": len(found),
+            "flagged_count": flagged_count,
+            "unknown_history_count": unknown_history_count,
+            "history_included": fetch_history,
+            "matches": matches,
+            "former_members": former_members,
+            "alliance_matches": alliance_matches,
+            "others": others,
+            "not_found": not_found,
+            "truncated": truncated,
+        }
+
+app.mount("/", StaticFiles(directory="static"), name="static")
