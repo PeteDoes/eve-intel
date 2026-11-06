@@ -381,4 +381,449 @@
     <textarea id="bulkNames" placeholder="Paste character names here, one per line (up to 1000)..."></textarea>
     <div class="bulk-row">
       <input type="text" id="bulkCorp" placeholder="Corporation to check for (optional)...">
-      <input type="text" id="bulkAlliance" placeholder="Alliance
+      <input type="text" id="bulkAlliance" placeholder="Alliance to check for (optional)...">
+    </div>
+    <label class="check-label">
+      <input type="checkbox" id="bulkHistory" checked>
+      Include employment history and corp-hopping check (always on when a corporation is entered)
+    </label>
+    <div class="bulk-row">
+      <button class="action" onclick="runBulkCheck()">Check Names</button>
+    </div>
+  </div>
+  <div class="hint">Finds each pilot's current corp and alliance. When you enter a corporation, it also finds pilots who were ever in that corp and have since left. Click any name to open their employment history. Pilots with a corp-hopping pattern are sorted to the top of each group. A flag is a hint to look closer, not proof of anything.</div>
+  <div class="loading-text" id="bulkLoading">Checking names... large lists with history can take 15 to 40 seconds.</div>
+  <div class="result-area" id="bulkResult"></div>
+</div>
+
+<script>
+function esc(text) {
+  if (text === null || text === undefined) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function showMode(mode) {
+  var modes = ['char', 'corp', 'bulk'];
+  for (var i = 0; i < modes.length; i++) {
+    var m = modes[i];
+    var section = document.getElementById(m + 'Section');
+    var tab = document.getElementById('tab' + m.charAt(0).toUpperCase() + m.slice(1));
+    if (m === mode) {
+      section.style.display = 'flex';
+      tab.classList.add('active');
+    } else {
+      section.style.display = 'none';
+      tab.classList.remove('active');
+    }
+  }
+}
+
+/* ---------- Character lookup ---------- */
+
+function buildListRows(items) {
+  if (!items || items.length === 0) {
+    return '<div class="row"><span class="value">No data available</span></div>';
+  }
+  var rows = '';
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var nameBlock = '<span class="fleetmate-name">' + (item.name || 'Unknown') + '</span>';
+    if (item.corporation_name) {
+      nameBlock += '<span class="sublabel">' + item.corporation_name + '</span>';
+    }
+    var label = nameBlock;
+    if (item.character_id) {
+      label = '<a class="fleetmate-link" href="https://zkillboard.com/character/' + item.character_id + '/" target="_blank">' + nameBlock + '</a>';
+    }
+    rows += '<div class="row"><span class="label">' + label + '</span><span class="value">' + item.kills + ' kills</span></div>';
+  }
+  return rows;
+}
+
+function buildEmploymentRows(history) {
+  if (!history || history.length === 0) {
+    return '<div class="row"><span class="value">No data available</span></div>';
+  }
+  var rows = '';
+  for (var i = 0; i < history.length; i++) {
+    var entry = history[i];
+    var durationText = (entry.duration_days !== null && entry.duration_days !== undefined) ? (entry.duration_days + ' days') : 'Unknown';
+    var startDate = entry.start_date ? entry.start_date.split('T')[0] : '';
+    rows += '<div class="row"><span class="label">' + esc(entry.corporation_name) + (entry.is_deleted ? ' (defunct)' : '') +
+      '<span class="sublabel">' + esc(startDate) + ' \u2192 ' + esc(entry.end_date) + '</span></span>' +
+      '<span class="value">' + durationText + '</span></div>';
+  }
+  return rows;
+}
+
+function buildCorpHopBanner(analysis) {
+  if (!analysis) return '';
+  var flagClass = 'flag-ok';
+  if (analysis.is_flagged) {
+    flagClass = 'flag-danger';
+  } else if (analysis.short_stint_count > 0) {
+    flagClass = 'flag-neutral';
+  }
+  return '<div class="flag-banner ' + flagClass + '">' + esc(analysis.reason) + '</div>';
+}
+
+async function searchCharacter() {
+  var name = document.getElementById('nameInput').value.trim();
+  if (!name) return;
+
+  var resultDiv = document.getElementById('result');
+  var loadingDiv = document.getElementById('loading');
+  resultDiv.style.display = 'none';
+  loadingDiv.style.display = 'block';
+
+  try {
+    var response = await fetch('/api/character/' + encodeURIComponent(name));
+    var data = await response.json();
+
+    loadingDiv.style.display = 'none';
+    resultDiv.style.display = 'block';
+
+    if (data.error) {
+      resultDiv.innerHTML = '<div class="card"><div class="row"><span class="value">' + esc(data.error) + '</span></div></div>';
+      return;
+    }
+
+    var zk = data.zkillboard || {};
+
+    var mainCard = '<div class="card">' +
+      '<div class="char-name-row">' +
+        '<div class="char-name">' + data.name + '</div>' +
+        '<a class="zkill-link" href="' + data.zkillboard_url + '" target="_blank">View on zKillboard \u2192</a>' +
+      '</div>' +
+      '<div class="row"><span class="label">Corporation</span><span class="value">' + (data.corporation_name || '\u2014') + '</span></div>' +
+      '<div class="row"><span class="label">Alliance</span><span class="value">' + (data.alliance_name || '\u2014') + '</span></div>' +
+      '<div class="row"><span class="label">Security Status</span><span class="value">' + (data.security_status ?? '\u2014') + '</span></div>' +
+      '<div class="row"><span class="label">Ships Destroyed</span><span class="value">' + (zk.ships_destroyed ?? '\u2014') + '</span></div>' +
+      '<div class="row"><span class="label">Ships Lost</span><span class="value">' + (zk.ships_lost ?? '\u2014') + '</span></div>' +
+      '<div class="row"><span class="label">ISK Destroyed</span><span class="value">' + (zk.isk_destroyed ? Math.round(zk.isk_destroyed).toLocaleString() : '\u2014') + '</span></div>' +
+      '<div class="row"><span class="label">Danger Ratio</span><span class="value">' + (zk.danger_ratio ?? '\u2014') + '</span></div>' +
+    '</div>';
+
+    var gridCards = '<div class="grid-cards">' +
+
+      '<details class="card" open>' +
+        '<summary class="card-title">Employment History &amp; Corp-Hopping Check</summary>' +
+        '<div class="card-body">' +
+          buildCorpHopBanner(data.corp_hop_analysis) +
+          buildEmploymentRows(data.employment_history) +
+        '</div>' +
+      '</details>' +
+
+      '<details class="card" open>' +
+        '<summary class="card-title">Preferred Ships (Recent Activity)</summary>' +
+        '<div class="card-body">' + buildListRows(data.top_ships) + '</div>' +
+      '</details>' +
+
+      '<details class="card" open>' +
+        '<summary class="card-title">Frequently Flies With \u2014 Alliances (Recent Activity)</summary>' +
+        '<div class="card-body">' + buildListRows(data.flies_with_alliances) + '</div>' +
+      '</details>' +
+
+      '<details class="card" open>' +
+        '<summary class="card-title">Frequently Flies With \u2014 Corporations (Recent Activity)</summary>' +
+        '<div class="card-body">' + buildListRows(data.flies_with_corporations) + '</div>' +
+      '</details>' +
+
+      '<details class="card">' +
+        '<summary class="card-title">Frequently Flies With \u2014 Characters (Recent Activity)</summary>' +
+        '<div class="card-body">' + buildListRows(data.flies_with_characters) + '</div>' +
+      '</details>' +
+
+    '</div>';
+
+    resultDiv.innerHTML = mainCard + gridCards;
+  } catch (err) {
+    loadingDiv.style.display = 'none';
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = '<div class="card"><div class="row"><span class="value">Something went wrong. Please try again.</span></div></div>';
+  }
+}
+
+document.getElementById('nameInput').addEventListener('keypress', function(e) {
+  if (e.key === 'Enter') {
+    searchCharacter();
+  }
+});
+
+/* ---------- Corp activity report ---------- */
+
+function buildPilotRows(pilots) {
+  if (!pilots || pilots.length === 0) {
+    return '<div class="row"><span class="value">No pilots with losses or kills in this period</span></div>';
+  }
+  var rows = '';
+  for (var i = 0; i < pilots.length; i++) {
+    var p = pilots[i];
+    var shipText = '';
+    for (var s = 0; s < p.ships_lost.length; s++) {
+      if (s > 0) shipText += ', ';
+      shipText += esc(p.ships_lost[s].name) + ' x' + p.ships_lost[s].count;
+    }
+    var sub = '';
+    if (shipText) {
+      sub += 'Lost: ' + shipText;
+      if (p.last_loss) sub += ' \u00B7 Last loss ' + esc(p.last_loss);
+    } else {
+      sub += 'No losses';
+    }
+    rows += '<div class="row">' +
+      '<span class="label"><a class="fleetmate-link" href="' + esc(p.zkillboard_url) + '" target="_blank">' +
+        '<span class="fleetmate-name">' + esc(p.name) + '</span></a>' +
+        '<span class="sublabel">' + sub + '</span></span>' +
+      '<span class="value"><span class="loss-num">' + p.losses + ' lost</span> \u00B7 <span class="kill-num">' + p.kills + ' kills</span></span>' +
+      '</div>';
+  }
+  return rows;
+}
+
+async function runCorpReport() {
+  var name = document.getElementById('corpInput').value.trim();
+  var since = document.getElementById('sinceInput').value;
+  if (!name || !since) {
+    alert('Please enter a corporation name and a start date.');
+    return;
+  }
+
+  var resultDiv = document.getElementById('corpResult');
+  var loadingDiv = document.getElementById('corpLoading');
+  resultDiv.style.display = 'none';
+  loadingDiv.style.display = 'block';
+
+  try {
+    var response = await fetch('/api/corp-activity?name=' + encodeURIComponent(name) + '&since=' + encodeURIComponent(since));
+    var data = await response.json();
+
+    loadingDiv.style.display = 'none';
+    resultDiv.style.display = 'block';
+
+    if (data.error) {
+      resultDiv.innerHTML = '<div class="card"><div class="row"><span class="value">' + esc(data.error) + '</span></div></div>';
+      return;
+    }
+
+    var capNote = '';
+    if (data.losses_capped || data.kills_capped) {
+      capNote = '<div class="flag-banner flag-neutral">This corp is very active. Only the 600 most recent losses and/or kills were scanned, so activity near the start date may be missing. Try a later start date for a complete picture.</div>';
+    }
+
+    var summary = '<div class="card">' +
+      '<div class="char-name">' + esc(data.corporation_name) + '</div>' +
+      '<div class="summary-line">Since ' + esc(data.since) + '</div>' +
+      '<div class="summary-line"><span class="loss-num">' + data.losses_counted + ' losses</span> \u00B7 <span class="kill-num">' + data.kills_counted + ' kills</span> \u00B7 ' + data.pilots.length + ' pilots</div>' +
+    '</div>';
+
+    var list = '<details class="card" open>' +
+      '<summary class="card-title">Pilots (most losses first)</summary>' +
+      '<div class="card-body">' + capNote + buildPilotRows(data.pilots) + '</div>' +
+    '</details>';
+
+    resultDiv.innerHTML = summary + list;
+  } catch (err) {
+    loadingDiv.style.display = 'none';
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = '<div class="card"><div class="row"><span class="value">Something went wrong. The corp may be too busy, so try a later start date.</span></div></div>';
+  }
+}
+
+/* ---------- Bulk check ---------- */
+
+function buildPilotBadge(p) {
+  if (!p.corp_hop) return '';
+  if (p.corp_hop.is_flagged) {
+    return '<span class="pilot-badge badge-danger">Flagged \u00B7 ' + p.corp_hop.short_stint_count + ' short</span>';
+  }
+  if (p.corp_hop.short_stint_count > 0) {
+    return '<span class="pilot-badge badge-warn">' + p.corp_hop.short_stint_count + ' short</span>';
+  }
+  return '<span class="pilot-badge badge-calm">' + p.corp_hop.total_corps + ' corps</span>';
+}
+
+function buildStintText(stints) {
+  if (!stints || stints.length === 0) return '';
+  var parts = [];
+  for (var i = 0; i < stints.length; i++) {
+    var s = stints[i];
+    var start = s.start_date ? s.start_date.split('T')[0] : '?';
+    var length = (s.duration_days !== null && s.duration_days !== undefined) ? (s.duration_days + ' days') : 'unknown length';
+    parts.push(esc(start) + ' \u2192 ' + esc(s.end_date) + ' (' + length + ')');
+  }
+  return parts.join('; ');
+}
+
+/* stintCorp is the corp name when the list is "formerly in the corp", otherwise null */
+function buildBulkRows(list, historyIncluded, stintCorp) {
+  if (!list || list.length === 0) {
+    return '<div class="row"><span class="value">None</span></div>';
+  }
+  var rows = '';
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i];
+    var sub = esc(p.corporation_name);
+    if (p.alliance_name) sub += ' \u00B7 ' + esc(p.alliance_name);
+
+    var stintLine = '';
+    if (stintCorp && p.target_corp_stints && p.target_corp_stints.length > 0) {
+      stintLine = '<span class="sublabel stint-note">Was in ' + esc(stintCorp) + ': ' + buildStintText(p.target_corp_stints) + '</span>';
+    }
+
+    var body = '<a class="zkill-link" href="' + esc(p.zkillboard_url) + '" target="_blank">View on zKillboard \u2192</a>';
+    if (p.employment_history && p.employment_history.length > 0) {
+      body += buildCorpHopBanner(p.corp_hop) + buildEmploymentRows(p.employment_history);
+    } else if (historyIncluded) {
+      body += '<div class="row"><span class="value">Employment history unavailable</span></div>';
+    }
+
+    rows += '<details class="pilot">' +
+      '<summary class="pilot-summary">' +
+        '<span class="pilot-main"><span class="fleetmate-name">' + esc(p.name) + '</span>' +
+          '<span class="sublabel">' + sub + '</span>' + stintLine + '</span>' +
+        buildPilotBadge(p) +
+      '</summary>' +
+      '<div class="pilot-body">' + body + '</div>' +
+    '</details>';
+  }
+  return rows;
+}
+
+async function runBulkCheck() {
+  var raw = document.getElementById('bulkNames').value;
+  var corp = document.getElementById('bulkCorp').value.trim();
+  var alliance = document.getElementById('bulkAlliance').value.trim();
+  var includeHistory = document.getElementById('bulkHistory').checked;
+  var names = raw.split(/\r?\n/);
+
+  var cleaned = [];
+  for (var i = 0; i < names.length; i++) {
+    var n = names[i].trim();
+    if (n) cleaned.push(n);
+  }
+  if (cleaned.length === 0) {
+    alert('Please paste at least one character name.');
+    return;
+  }
+
+  var resultDiv = document.getElementById('bulkResult');
+  var loadingDiv = document.getElementById('bulkLoading');
+  resultDiv.style.display = 'none';
+  loadingDiv.style.display = 'block';
+
+  try {
+    var response = await fetch('/api/bulk-check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names: cleaned, corp: corp, alliance: alliance, include_history: includeHistory })
+    });
+    var data = await response.json();
+
+    loadingDiv.style.display = 'none';
+    resultDiv.style.display = 'block';
+
+    if (data.error) {
+      resultDiv.innerHTML = '<div class="card"><div class="row"><span class="value">' + esc(data.error) + '</span></div></div>';
+      return;
+    }
+
+    var truncNote = '';
+    if (data.truncated) {
+      truncNote = '<div class="flag-banner flag-neutral">Only the first 1000 unique names were checked.</div>';
+    }
+
+    var unknownNote = '';
+    if (data.target_corp && data.unknown_history_count > 0) {
+      unknownNote = '<div class="flag-banner flag-neutral">EVE did not return employment history for ' + data.unknown_history_count +
+        ' pilot(s), so we cannot tell whether they were ever in ' + esc(data.target_corp) + '. Run the check again to retry them.</div>';
+    }
+
+    var corpCount = data.matches.length;
+    var formerCount = data.former_members.length;
+    var allianceCount = data.alliance_matches.length;
+    var otherCount = data.others.length;
+
+    var summaryHtml = '<div class="card">' + truncNote + unknownNote +
+      '<div class="char-name">Bulk Check Results</div>' +
+      '<div class="summary-line">' + data.total_names + ' unique names \u00B7 ' + data.found_count + ' found \u00B7 ' + data.not_found.length + ' not found</div>';
+
+    if (data.history_included) {
+      summaryHtml += '<div class="summary-line"><span class="loss-num">' + data.flagged_count + ' flagged for corp-hopping</span></div>';
+    }
+    if (data.target_corp) {
+      summaryHtml += '<div class="summary-line"><span class="kill-num">' + corpCount + ' currently in ' + esc(data.target_corp) + '</span></div>';
+      summaryHtml += '<div class="summary-line"><span class="warn-num">' + formerCount + ' formerly in ' + esc(data.target_corp) + ' (since left)</span></div>';
+    }
+    if (data.target_alliance) {
+      var allianceWord = data.target_corp ? ' in alliance ' + esc(data.target_alliance) + ' (never in the corp)' : ' in alliance ' + esc(data.target_alliance);
+      summaryHtml += '<div class="summary-line"><span class="kill-num">' + allianceCount + allianceWord + '</span></div>';
+    }
+
+    var otherLabel = 'Everyone else';
+    if (data.target_corp && data.target_alliance) {
+      otherLabel = 'Never in the corp and not in the alliance';
+    } else if (data.target_corp) {
+      otherLabel = 'Never in the corp';
+    } else if (data.target_alliance) {
+      otherLabel = 'Not in the alliance';
+    }
+    if (data.target_corp || data.target_alliance) {
+      summaryHtml += '<div class="summary-line"><span class="loss-num">' + otherCount + ' ' + esc(otherLabel.toLowerCase()) + '</span></div>';
+    }
+    summaryHtml += '</div>';
+
+    var html = summaryHtml;
+
+    if (data.target_corp) {
+      html += '<details class="card" open>' +
+        '<summary class="card-title">Currently in corp ' + esc(data.target_corp) + ' (' + corpCount + ')</summary>' +
+        '<div class="card-body">' + buildBulkRows(data.matches, data.history_included, null) + '</div>' +
+      '</details>';
+
+      html += '<details class="card" open>' +
+        '<summary class="card-title">Formerly in corp ' + esc(data.target_corp) + ' (' + formerCount + ')</summary>' +
+        '<div class="card-body">' + buildBulkRows(data.former_members, data.history_included, data.target_corp) + '</div>' +
+      '</details>';
+    }
+
+    if (data.target_alliance) {
+      var allianceTitle = data.target_corp
+        ? 'In alliance ' + esc(data.target_alliance) + ', never in the corp (' + allianceCount + ')'
+        : 'In alliance ' + esc(data.target_alliance) + ' (' + allianceCount + ')';
+      html += '<details class="card" open>' +
+        '<summary class="card-title">' + allianceTitle + '</summary>' +
+        '<div class="card-body">' + buildBulkRows(data.alliance_matches, data.history_included, null) + '</div>' +
+      '</details>';
+    }
+
+    var hasTarget = data.target_corp || data.target_alliance;
+    html += '<details class="card"' + (hasTarget ? '' : ' open') + '>' +
+      '<summary class="card-title">' + (hasTarget ? esc(otherLabel) : 'All pilots, grouped by corp') + ' (' + otherCount + ')</summary>' +
+      '<div class="card-body">' + buildBulkRows(data.others, data.history_included, null) + '</div>' +
+    '</details>';
+
+    if (data.not_found.length > 0) {
+      var nf = [];
+      for (var j = 0; j < data.not_found.length; j++) nf.push(esc(data.not_found[j]));
+      html += '<details class="card">' +
+        '<summary class="card-title">Names not found (' + data.not_found.length + ')</summary>' +
+        '<div class="card-body"><div class="not-found-list">' + nf.join(', ') + '</div></div>' +
+      '</details>';
+    }
+
+    resultDiv.innerHTML = html;
+  } catch (err) {
+    loadingDiv.style.display = 'none';
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = '<div class="card"><div class="row"><span class="value">Something went wrong. Please try again.</span></div></div>';
+  }
+}
+</script>
+
+</body>
+</html>
